@@ -150,6 +150,8 @@ impl Hdc {
     }
 }
 
+pub type Screen = Hdc;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ColorRef(pub u32);
 
@@ -158,6 +160,22 @@ pub struct ColorRGB {
     pub r: u8,
     pub g: u8,
     pub b: u8,
+}
+
+impl std::str::FromStr for ColorRGB {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_ascii() && s.len() == 7 && s.starts_with('#') {
+            Ok(Self {
+                r: u8::from_str_radix(&s[1..3], 16).map_err(|_| ())?,
+                g: u8::from_str_radix(&s[3..5], 16).map_err(|_| ())?,
+                b: u8::from_str_radix(&s[5..7], 16).map_err(|_| ())?,
+            })
+        } else {
+            Err(())
+        }
+    }
 }
 
 impl ColorRef {

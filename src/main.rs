@@ -1,19 +1,30 @@
-use crate::screen::Hdc;
-use enigo::{
-    Button, Coordinate,
-    Direction::{Click, Press, Release},
-    Enigo, Key, Keyboard, Mouse, Settings,
-};
+use crate::input::*;
+use crate::lang::{parse::*, run::*};
+use crate::screen::*;
 
+mod input;
+mod lang;
 mod screen;
 
 fn main() {
-    let mut input = Enigo::new(&Settings::default()).unwrap();
-    input.move_mouse(50, 50, Coordinate::Rel).unwrap();
-    input.button(Button::Left, Click).unwrap();
-    let (mouse_x, mouse_y) = input.location().unwrap();
+    let mut input = Input::new().unwrap();
+    let mut screen = unsafe { Screen::new(None) }.unwrap();
 
-    let mut hdc = unsafe { Hdc::new(None) }.unwrap();
-    let px = unsafe { hdc.get_pixel(mouse_x, mouse_y) }.unwrap().to_rgb();
-    println!("Color at ({mouse_x}, {mouse_y}): {px:?}");
+    match include_str!("../example.txt").parse::<Program>() {
+        Ok(prgm) => {
+            let mut runner = Runner::from_program(&prgm, 1024);
+            let exit_status = loop {
+                if let ControlFlow::Break(result) = runner.step(&mut input, &mut screen) {
+                    break result;
+                }
+            };
+            match exit_status {
+                Ok(()) => println!("closed with success"),
+                Err(e) => println!("runtime error: {e}"),
+            }
+        }
+        Err(e) => {
+            println!("parse error: {e}");
+        }
+    }
 }
