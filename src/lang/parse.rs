@@ -2,15 +2,16 @@ use std::collections::HashMap;
 
 use crate::lang::{
     address::{Address, AddressRange, UAddr},
-    run::{Source, Type},
+    memory::Source,
+    types::Type,
 };
 
 #[derive(Debug, Clone)]
 pub struct Program(Vec<Instruction>);
 
 impl Program {
-    pub fn line(&self, n: usize) -> Option<&Instruction> {
-        self.0.get(n)
+    pub fn line(&self, n: UAddr) -> Option<&Instruction> {
+        self.0.get(n as usize)
     }
 }
 
@@ -356,6 +357,11 @@ instructions! {
         [Out] dest: Generic(T),
         /// The value to set with
         [In] src: Generic(T)
+    );
+    "jumpif" => If(
+        /// The value to set with
+        [In] cond: Static(Type::Bool),
+        [In] jump: Static(Type::Label)
     );
     "+" => Add(
         [InOut] dest: Static(Type::Int),

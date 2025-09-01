@@ -1,13 +1,14 @@
-use enigo::Direction;
-
 use crate::{
-    input::{Button, Coordinate, Input, InputError, Key, KeyboardKey, MouseButton},
+    input::{Button, Coordinate, Input, InputError, Key},
     lang::{
         address::{Address, AddressRange, UAddr},
+        memory::{Memory, Source},
         parse::{Instruction, Program},
+        types::Type,
     },
     screen::{ColorRGB, Screen, ScreenError},
 };
+use enigo::Direction;
 pub use std::ops::ControlFlow;
 
 #[derive(Debug)]
@@ -92,260 +93,13 @@ impl std::error::Error for RuntimeError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    Immediate(Box<[u8]>),
-    Address(AddressRange),
-}
-
-impl std::fmt::Display for Source {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Immediate(value) => write!(f, "${value:?}"),
-            Self::Address(addr) => write!(f, "{addr}"),
-        }
-    }
-}
-
-impl Source {
-    fn get<'a>(&'a self, ram: &'a Memory) -> Result<&'a [u8], RuntimeError> {
-        match self {
-            Self::Immediate(value) => Ok(value),
-            Self::Address(addr) => ram.get(*addr),
-        }
-    }
-
-    fn get_as<'a, T>(&'a self, ram: &'a Memory) -> Result<&'a T, RuntimeError> {
-        match self {
-            Self::Immediate(value) => {
-                assert_eq!(self.size() as usize, std::mem::size_of::<T>());
-                Ok(unsafe { &*std::ptr::from_ref::<[u8]>(value).cast::<T>() })
-            }
-            Self::Address(addr) => ram.get_as(*addr),
-        }
-    }
-
-    fn get_as_str<'a>(&'a self, ram: &'a Memory) -> Result<&'a str, RuntimeError> {
-        match self {
-            Self::Immediate(value) => Ok(str::from_utf8(value)?),
-            Self::Address(addr) => ram.get_as_str(*addr),
-        }
-    }
-
-    pub fn size(&self) -> UAddr {
-        match self {
-            Self::Immediate(value) => value
-                .len()
-                .try_into()
-                .expect("should be guaranteed by invariant"),
-            Self::Address(addr) => addr.size(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Memory {
-    data: Vec<u8>,
-}
-
-impl Memory {
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            data: vec![0; capacity],
-        }
-    }
-
-    #[inline]
-    pub fn get(&self, range: AddressRange) -> Result<&[u8], RuntimeError> {
-        let len = self.data.len();
-        self.data
-            .get(range.memory())
-            .ok_or(RuntimeError::InvalidDeref {
-                addr: range,
-                possible: AddressRange::range_to(Address(
-                    len.try_into().expect("should be invariant"),
-                )),
-            })
-    }
-
-    #[inline]
-    pub fn get_mut(&mut self, range: AddressRange) -> Result<&mut [u8], RuntimeError> {
-        let len = self.data.len();
-        self.data
-            .get_mut(range.memory())
-            .ok_or(RuntimeError::InvalidDeref {
-                addr: range,
-                possible: AddressRange::range_to(Address(
-                    len.try_into().expect("should be invariant"),
-                )),
-            })
-    }
-
-    #[inline]
-    pub fn get_as<T>(&self, range: AddressRange) -> Result<&T, RuntimeError> {
-        assert_eq!(range.size() as usize, std::mem::size_of::<T>());
-        self.get(range)
-            .map(|data| unsafe { &*(std::ptr::from_ref::<[u8]>(data).cast::<T>()) })
-    }
-
-    #[inline]
-    pub fn get_as_str(&self, range: AddressRange) -> Result<&str, RuntimeError> {
-        self.get(range)
-            .and_then(|data| str::from_utf8(data).map_err(RuntimeError::from))
-    }
-
-    #[inline]
-    pub fn get_mut_as<T>(&mut self, range: AddressRange) -> Result<&mut T, RuntimeError> {
-        assert_eq!(range.size() as usize, std::mem::size_of::<T>());
-        self.get_mut(range)
-            .map(|data| unsafe { &mut *(std::ptr::from_mut::<[u8]>(data).cast::<T>()) })
-    }
-
-    #[inline]
-    pub fn copy(&mut self, dest: AddressRange, src: AddressRange) -> Result<(), RuntimeError> {
-        self.data.copy_within(src.memory(), dest.memory().start);
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Type {
-    Bool,
-    Int,
-    Str,
-    Color,
-    Key,
-    Button,
-    Action,
-    Coordinate,
-    Union(Box<[Type]>),
-}
-
-impl Type {
-    fn discriminant_size(union_tys: &[Type]) -> Result<UAddr, RuntimeError> {
-        let num_variants = union_tys.len() as u128;
-        [
-            (u8::MAX as u128, size_of::<u8>() as UAddr),
-            (u16::MAX as u128, size_of::<u16>() as UAddr),
-            (u32::MAX as u128, size_of::<u32>() as UAddr),
-        ]
-        .iter()
-        .copied()
-        .find(|(max_variants, _)| &num_variants <= max_variants)
-        .map(|(_, num_bytes)| num_bytes)
-        .ok_or(RuntimeError::UnionSizeOverflow(num_variants))
-    }
-
-    fn union_variant<'a, 'b>(
-        union_tys: &'a [Type],
-        value: &'b [u8],
-    ) -> Result<(&'a Type, &'b [u8]), RuntimeError> {
-        let discriminant_size = Type::discriminant_size(union_tys)?;
-        let (discr, value) = value.split_at(discriminant_size as usize);
-        let discr = match *discr {
-            [b0] => u8::from_ne_bytes([b0]) as usize,
-            [b0, b1] => u16::from_ne_bytes([b0, b1]) as usize,
-            [b0, b1, b2, b3] => u32::from_ne_bytes([b0, b1, b2, b3]) as usize,
-            _ => unreachable!(),
-        };
-        Ok((&union_tys[discr as usize], value))
-    }
-
-    #[inline]
-    pub fn size(&self) -> Result<UAddr, RuntimeError> {
-        use std::mem::size_of;
-        match self {
-            Self::Bool => Ok(size_of::<bool>() as UAddr),
-            Self::Int => Ok(size_of::<i32>() as UAddr),
-            Self::Str => Ok(size_of::<String>() as UAddr),
-            Self::Color => Ok(size_of::<ColorRGB>() as UAddr),
-            Self::Key => Ok(size_of::<Key>() as UAddr),
-            Self::Button => Ok(size_of::<Button>() as UAddr),
-            Self::Action => Ok(size_of::<Direction>() as UAddr),
-            Self::Coordinate => Ok(size_of::<Coordinate>() as UAddr),
-            Self::Union(tys) => Self::discriminant_size(tys)?
-                .checked_add(
-                    tys.iter()
-                        .try_fold(0, |max, ty| ty.size().map(|size| max.max(size)))?,
-                )
-                .ok_or_else(|| RuntimeError::TypeSizeOverflow(self.clone())),
-        }
-    }
-
-    pub fn try_parse_imm(&self, s: &str) -> Option<Box<[u8]>> {
-        match self {
-            Self::Bool => match s {
-                "True" => Some(true),
-                "False" => Some(false),
-                _ => None,
-            }
-            .map(|x| [x as u8])
-            .map(Box::from),
-            Self::Int => s.parse::<i32>().ok().map(i32::to_ne_bytes).map(Box::from),
-            Self::Str => Some(Box::from(s.as_bytes())),
-            Self::Color => s
-                .parse::<ColorRGB>()
-                .ok()
-                .map(|x| [x.r, x.g, x.b])
-                .map(Box::from),
-            Self::Key => s
-                .parse::<KeyboardKey>()
-                .ok()
-                .map(KeyboardKey::to_ne_bytes)
-                .map(Box::from),
-            Self::Button => s
-                .parse::<MouseButton>()
-                .ok()
-                .map(MouseButton::to_ne_bytes)
-                .map(Box::from),
-            Self::Action => match s {
-                "Press" => Some(Direction::Press),
-                "Release" => Some(Direction::Release),
-                "Click" => Some(Direction::Click),
-                _ => None,
-            }
-            .map(|x| [x as u8])
-            .map(Box::from),
-            Self::Coordinate => match s {
-                "Abs" => Some(Coordinate::Abs),
-                "Rel" => Some(Coordinate::Rel),
-                _ => None,
-            }
-            .map(|x| [x as u8])
-            .map(Box::from),
-            Self::Union(tys) => tys.iter().find_map(|ty| ty.try_parse_imm(s)),
-        }
-    }
-
-    pub fn try_deduce_imm(s: &str) -> Option<Self> {
-        match s {
-            "True" | "False" => Some(Self::Bool),
-            "Abs" | "Rel" => Some(Self::Coordinate),
-            _ => {
-                if s.parse::<i32>().is_ok() {
-                    Some(Self::Int)
-                } else if s.starts_with('#') {
-                    Some(Self::Color)
-                } else if s.starts_with('"') && s.ends_with('"') {
-                    Some(Self::Str)
-                } else if s.parse::<KeyboardKey>().is_ok() {
-                    Some(Self::Key)
-                } else if s.parse::<MouseButton>().is_ok() {
-                    Some(Self::Button)
-                } else {
-                    None // todo
-                }
-            }
-        }
-    }
-}
-
 impl Instruction {
     fn run(
         &self,
         input: &mut Input,
         screen: &mut Screen,
         ram: &mut Memory,
+        counter: &mut UAddr,
     ) -> Result<(), RuntimeError> {
         match self {
             Self::Set { T, dest, src } => {
@@ -355,6 +109,14 @@ impl Instruction {
                 match src {
                     Source::Immediate(val) => ram.get_mut(*dest)?.copy_from_slice(val),
                     Source::Address(src) => ram.copy(*dest, *src)?,
+                }
+            }
+            Self::If { cond, jump } => {
+                let cond = *cond.get_as::<bool>(ram)?;
+                let jump = *jump.get_as::<UAddr>(ram)?;
+                if !cond {
+                    *counter = jump;
+                    return Ok(());
                 }
             }
             Self::Add { dest, lhs, rhs } => {
@@ -436,6 +198,7 @@ impl Instruction {
                     match ty {
                         Type::Bool => println!("{}", what.get_as::<bool>(ram)?),
                         Type::Int => println!("{}", what.get_as::<i32>(ram)?),
+                        Type::Label => println!("0x{:08x}", what.get_as::<UAddr>(ram)?),
                         Type::Str => println!("{}", what.get_as_str(ram)?),
                         Type::Color => println!("{:?}", what.get_as::<ColorRGB>(ram)?),
                         Type::Key => println!("{:?}", what.get_as::<Key>(ram)?),
@@ -468,6 +231,7 @@ impl Instruction {
                 input.button(button, action)?;
             }
         }
+        *counter += 1;
         Ok(())
     }
 }
@@ -476,11 +240,11 @@ impl Instruction {
 pub struct Runner<'a> {
     memory: Memory,
     prgm: &'a Program,
-    counter: usize,
+    counter: UAddr,
 }
 
 impl Runner<'_> {
-    pub fn from_program(prgm: &Program, ram_capacity: usize) -> Runner<'_> {
+    pub fn from_program(prgm: &Program, ram_capacity: UAddr) -> Runner<'_> {
         Runner {
             memory: Memory::with_capacity(ram_capacity),
             prgm,
@@ -495,10 +259,9 @@ impl Runner<'_> {
     ) -> ControlFlow<Result<(), RuntimeError>, ()> {
         match self.prgm.line(self.counter) {
             Some(line) => {
-                if let Err(e) = line.run(input, screen, &mut self.memory) {
+                if let Err(e) = line.run(input, screen, &mut self.memory, &mut self.counter) {
                     return ControlFlow::Break(Err(e));
                 }
-                self.counter += 1;
                 ControlFlow::Continue(())
             }
             None => ControlFlow::Break(Ok(())),

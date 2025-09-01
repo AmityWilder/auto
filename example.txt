@@ -6,7 +6,7 @@ set y x
 getpx color x y
 print color
 
-# mouse Abs x y
+mouse Abs x y
 # kb Press Shift
 # kb Click X
 # kb Release Shift
