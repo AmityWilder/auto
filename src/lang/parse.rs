@@ -416,6 +416,9 @@ instructions! {
     "print" => Print<T>(
         [In] what: Generic(T)
     );
+    "wait" => Wait(
+        [In] ms: Static(Type::Int)
+    );
     "mouse" => MoveMouse(
         [In] coord: Static(Type::Coordinate),
         [In] x: Static(Type::Int),

@@ -214,6 +214,10 @@ impl Instruction {
                 }
                 print(T, what, ram)?;
             }
+            Self::Wait { ms } => {
+                let ms = (*ms.get_as::<i32>(ram)?).max(0);
+                std::thread::sleep(std::time::Duration::from_millis(ms.try_into().unwrap()));
+            }
             Self::MoveMouse { coord, x, y } => {
                 let coord = *coord.get_as::<Coordinate>(ram)?;
                 let x = *x.get_as::<i32>(ram)?;
