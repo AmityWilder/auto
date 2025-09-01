@@ -203,53 +203,13 @@ impl Input {
     }
 
     #[inline]
-    pub fn move_mouse_rel(&mut self, x: i32, y: i32) -> InputResult<()> {
-        self.move_mouse(x, y, Coordinate::Rel)
-    }
-
-    #[inline]
-    pub fn move_mouse_abs(&mut self, x: i32, y: i32) -> InputResult<()> {
-        self.move_mouse(x, y, Coordinate::Abs)
-    }
-
-    #[inline]
     pub fn move_mouse(&mut self, x: i32, y: i32, coordinate: Coordinate) -> InputResult<()> {
         self.0.move_mouse(x, y, coordinate)
     }
 
     #[inline]
-    pub fn key_press(&mut self, key: Key) -> InputResult<()> {
-        self.key(key, Direction::Press)
-    }
-
-    #[inline]
-    pub fn key_release(&mut self, key: Key) -> InputResult<()> {
-        self.key(key, Direction::Release)
-    }
-
-    #[inline]
-    pub fn key_click(&mut self, key: Key) -> InputResult<()> {
-        self.key(key, Direction::Click)
-    }
-
-    #[inline]
     pub fn key(&mut self, key: Key, direction: Direction) -> InputResult<()> {
         self.0.key(key, direction)
-    }
-
-    #[inline]
-    pub fn button_press(&mut self, button: Button) -> InputResult<()> {
-        self.button(button, Direction::Press)
-    }
-
-    #[inline]
-    pub fn button_release(&mut self, button: Button) -> InputResult<()> {
-        self.button(button, Direction::Release)
-    }
-
-    #[inline]
-    pub fn button_click(&mut self, button: Button) -> InputResult<()> {
-        self.button(button, Direction::Click)
     }
 
     #[inline]

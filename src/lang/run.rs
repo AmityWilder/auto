@@ -17,6 +17,7 @@ pub enum RuntimeError {
         possible: AddressRange,
     },
     TypeSizeOverflow(Type),
+    UnionSizeOverflow(u128),
     AddressOverflow(Address, UAddr),
     DivByZero,
     InputError(InputError),
@@ -60,6 +61,12 @@ impl std::fmt::Display for RuntimeError {
                     "type size in bytes resulted in integer overflow. type: {ty:?}"
                 )
             }
+            Self::UnionSizeOverflow(count) => {
+                write!(
+                    f,
+                    "union has more variants ({count}) than can be expressed with the largest available integer"
+                )
+            }
             Self::AddressOverflow(addr, size) => {
                 write!(
                     f,
@@ -101,6 +108,13 @@ impl std::fmt::Display for Source {
 }
 
 impl Source {
+    fn get<'a>(&'a self, ram: &'a Memory) -> Result<&'a [u8], RuntimeError> {
+        match self {
+            Self::Immediate(value) => Ok(value),
+            Self::Address(addr) => ram.get(*addr),
+        }
+    }
+
     fn get_as<'a, T>(&'a self, ram: &'a Memory) -> Result<&'a T, RuntimeError> {
         match self {
             Self::Immediate(value) => {
@@ -204,9 +218,39 @@ pub enum Type {
     Button,
     Action,
     Coordinate,
+    Union(Box<[Type]>),
 }
 
 impl Type {
+    fn discriminant_size(union_tys: &[Type]) -> Result<UAddr, RuntimeError> {
+        let num_variants = union_tys.len() as u128;
+        [
+            (u8::MAX as u128, size_of::<u8>() as UAddr),
+            (u16::MAX as u128, size_of::<u16>() as UAddr),
+            (u32::MAX as u128, size_of::<u32>() as UAddr),
+        ]
+        .iter()
+        .copied()
+        .find(|(max_variants, _)| &num_variants <= max_variants)
+        .map(|(_, num_bytes)| num_bytes)
+        .ok_or(RuntimeError::UnionSizeOverflow(num_variants))
+    }
+
+    fn union_variant<'a, 'b>(
+        union_tys: &'a [Type],
+        value: &'b [u8],
+    ) -> Result<(&'a Type, &'b [u8]), RuntimeError> {
+        let discriminant_size = Type::discriminant_size(union_tys)?;
+        let (discr, value) = value.split_at(discriminant_size as usize);
+        let discr = match *discr {
+            [b0] => u8::from_ne_bytes([b0]) as usize,
+            [b0, b1] => u16::from_ne_bytes([b0, b1]) as usize,
+            [b0, b1, b2, b3] => u32::from_ne_bytes([b0, b1, b2, b3]) as usize,
+            _ => unreachable!(),
+        };
+        Ok((&union_tys[discr as usize], value))
+    }
+
     #[inline]
     pub fn size(&self) -> Result<UAddr, RuntimeError> {
         use std::mem::size_of;
@@ -219,6 +263,12 @@ impl Type {
             Self::Button => Ok(size_of::<Button>() as UAddr),
             Self::Action => Ok(size_of::<Direction>() as UAddr),
             Self::Coordinate => Ok(size_of::<Coordinate>() as UAddr),
+            Self::Union(tys) => Self::discriminant_size(tys)?
+                .checked_add(
+                    tys.iter()
+                        .try_fold(0, |max, ty| ty.size().map(|size| max.max(size)))?,
+                )
+                .ok_or_else(|| RuntimeError::TypeSizeOverflow(self.clone())),
         }
     }
 
@@ -263,6 +313,7 @@ impl Type {
             }
             .map(|x| [x as u8])
             .map(Box::from),
+            Self::Union(tys) => tys.iter().find_map(|ty| ty.try_parse_imm(s)),
         }
     }
 
@@ -380,16 +431,26 @@ impl Instruction {
                     .to_rgb();
                 *ram.get_mut_as(*dest)? = color;
             }
-            Self::Print { T, what } => match T {
-                Type::Bool => println!("{}", what.get_as::<bool>(ram)?),
-                Type::Int => println!("{}", what.get_as::<i32>(ram)?),
-                Type::Str => println!("{}", what.get_as_str(ram)?),
-                Type::Color => println!("{:?}", what.get_as::<ColorRGB>(ram)?),
-                Type::Key => println!("{:?}", what.get_as::<Key>(ram)?),
-                Type::Button => println!("{:?}", what.get_as::<Button>(ram)?),
-                Type::Action => println!("{:?}", what.get_as::<Direction>(ram)?),
-                Type::Coordinate => println!("{:?}", what.get_as::<Coordinate>(ram)?),
-            },
+            Self::Print { T, what } => {
+                fn print(ty: &Type, what: &Source, ram: &Memory) -> Result<(), RuntimeError> {
+                    match ty {
+                        Type::Bool => println!("{}", what.get_as::<bool>(ram)?),
+                        Type::Int => println!("{}", what.get_as::<i32>(ram)?),
+                        Type::Str => println!("{}", what.get_as_str(ram)?),
+                        Type::Color => println!("{:?}", what.get_as::<ColorRGB>(ram)?),
+                        Type::Key => println!("{:?}", what.get_as::<Key>(ram)?),
+                        Type::Button => println!("{:?}", what.get_as::<Button>(ram)?),
+                        Type::Action => println!("{:?}", what.get_as::<Direction>(ram)?),
+                        Type::Coordinate => println!("{:?}", what.get_as::<Coordinate>(ram)?),
+                        Type::Union(tys) => {
+                            let (ty, bytes) = Type::union_variant(tys, what.get(ram)?)?;
+                            print(ty, &Source::Immediate(Box::from(bytes)), ram)?;
+                        }
+                    }
+                    Ok(())
+                }
+                print(T, what, ram)?;
+            }
             Self::MoveMouse { coord, x, y } => {
                 let coord = *coord.get_as::<Coordinate>(ram)?;
                 let x = *x.get_as::<i32>(ram)?;
