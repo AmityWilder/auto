@@ -4,6 +4,24 @@ use windows::Win32::{
 };
 
 #[derive(Debug)]
+pub enum ScreenError {
+    OutsideClippingRegion { x: i32, y: i32 },
+}
+
+impl std::fmt::Display for ScreenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutsideClippingRegion { x, y } => write!(
+                f,
+                "position ({x}, {y}) is out of bounds for the screen's clipping region"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ScreenError {}
+
+#[derive(Debug)]
 pub struct Hdc(Option<HWND>, HDC);
 
 impl Drop for Hdc {
@@ -142,10 +160,10 @@ impl Hdc {
     /// supports this function.
     ///
     /// A bitmap must be selected within the device context, otherwise, `CLR_INVALID` is returned on all pixels.
-    pub unsafe fn get_pixel(&mut self, x: i32, y: i32) -> Option<ColorRef> {
+    pub unsafe fn get_pixel(&mut self, x: i32, y: i32) -> Result<ColorRef, ScreenError> {
         match unsafe { GetPixel(self.1, x, y) } {
-            COLORREF(CLR_INVALID) => None,
-            color => Some(ColorRef(color.0)),
+            COLORREF(CLR_INVALID) => Err(ScreenError::OutsideClippingRegion { x, y }),
+            color => Ok(ColorRef(color.0)),
         }
     }
 }

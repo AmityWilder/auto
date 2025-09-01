@@ -1,10 +1,12 @@
+use enigo::Direction;
+
 use crate::{
     input::{Button, Coordinate, Input, InputError, Key, KeyboardKey, MouseButton},
     lang::{
         address::{Address, AddressRange, UAddr},
-        parse::Program,
+        parse::{Instruction, Program},
     },
-    screen::{ColorRGB, Screen},
+    screen::{ColorRGB, Screen, ScreenError},
 };
 pub use std::ops::ControlFlow;
 
@@ -16,7 +18,9 @@ pub enum RuntimeError {
     },
     TypeSizeOverflow(Type),
     AddressOverflow(Address, UAddr),
+    DivByZero,
     InputError(InputError),
+    ScreenError(ScreenError),
     Utf8Error(std::str::Utf8Error),
 }
 
@@ -24,6 +28,13 @@ impl From<InputError> for RuntimeError {
     #[inline]
     fn from(e: InputError) -> Self {
         Self::InputError(e)
+    }
+}
+
+impl From<ScreenError> for RuntimeError {
+    #[inline]
+    fn from(e: ScreenError) -> Self {
+        Self::ScreenError(e)
     }
 }
 
@@ -55,7 +66,9 @@ impl std::fmt::Display for RuntimeError {
                     "address range resulted in integer overflow. address: {addr}, size: {size}"
                 )
             }
+            Self::DivByZero => write!(f, "attempted to divide by zero"),
             Self::InputError(_) => write!(f, "input error"),
+            Self::ScreenError(_) => write!(f, "screen error"),
             Self::Utf8Error(_) => write!(f, "utf8 error"),
         }
     }
@@ -65,6 +78,7 @@ impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InputError(e) => Some(e),
+            Self::ScreenError(e) => Some(e),
             Self::Utf8Error(e) => Some(e),
             _ => None,
         }
@@ -77,14 +91,16 @@ pub enum Source {
     Address(AddressRange),
 }
 
-impl Source {
-    fn get<'a>(&'a self, ram: &'a Memory) -> Result<&'a [u8], RuntimeError> {
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Immediate(value) => Ok(value),
-            Self::Address(addr) => ram.get(*addr),
+            Self::Immediate(value) => write!(f, "${value:?}"),
+            Self::Address(addr) => write!(f, "{addr}"),
         }
     }
+}
 
+impl Source {
     fn get_as<'a, T>(&'a self, ram: &'a Memory) -> Result<&'a T, RuntimeError> {
         match self {
             Self::Immediate(value) => {
@@ -165,10 +181,10 @@ impl Memory {
     }
 
     #[inline]
-    pub fn get_mut_as<T>(&self, range: AddressRange) -> Result<&T, RuntimeError> {
+    pub fn get_mut_as<T>(&mut self, range: AddressRange) -> Result<&mut T, RuntimeError> {
         assert_eq!(range.size() as usize, std::mem::size_of::<T>());
-        self.get(range)
-            .map(|data| unsafe { &*(std::ptr::from_ref::<[u8]>(data).cast::<T>()) })
+        self.get_mut(range)
+            .map(|data| unsafe { &mut *(std::ptr::from_mut::<[u8]>(data).cast::<T>()) })
     }
 
     #[inline]
@@ -182,14 +198,12 @@ impl Memory {
 pub enum Type {
     Bool,
     Int,
-    String,
+    Str,
     Color,
     Key,
     Button,
+    Action,
     Coordinate,
-    List { ty: Box<Type> },
-    Array { ty: Box<Type>, count: UAddr },
-    Tuple { tys: Box<[Type]> },
 }
 
 impl Type {
@@ -199,17 +213,12 @@ impl Type {
         match self {
             Self::Bool => Ok(size_of::<bool>() as UAddr),
             Self::Int => Ok(size_of::<i32>() as UAddr),
-            Self::String => Ok(size_of::<String>() as UAddr),
+            Self::Str => Ok(size_of::<String>() as UAddr),
             Self::Color => Ok(size_of::<ColorRGB>() as UAddr),
             Self::Key => Ok(size_of::<Key>() as UAddr),
             Self::Button => Ok(size_of::<Button>() as UAddr),
+            Self::Action => Ok(size_of::<Direction>() as UAddr),
             Self::Coordinate => Ok(size_of::<Coordinate>() as UAddr),
-            Self::List { .. } => Ok(size_of::<AddressRange>() as UAddr),
-            Self::Array { ty, count } => ty
-                .size()?
-                .checked_mul(*count)
-                .ok_or_else(|| RuntimeError::TypeSizeOverflow(self.clone())),
-            Self::Tuple { tys } => tys.iter().map(|ty| ty.size()).sum(),
         }
     }
 
@@ -223,7 +232,7 @@ impl Type {
             .map(|x| [x as u8])
             .map(Box::from),
             Self::Int => s.parse::<i32>().ok().map(i32::to_ne_bytes).map(Box::from),
-            Self::String => Some(Box::from(s.as_bytes())),
+            Self::Str => Some(Box::from(s.as_bytes())),
             Self::Color => s
                 .parse::<ColorRGB>()
                 .ok()
@@ -239,6 +248,14 @@ impl Type {
                 .ok()
                 .map(MouseButton::to_ne_bytes)
                 .map(Box::from),
+            Self::Action => match s {
+                "Press" => Some(Direction::Press),
+                "Release" => Some(Direction::Release),
+                "Click" => Some(Direction::Click),
+                _ => None,
+            }
+            .map(|x| [x as u8])
+            .map(Box::from),
             Self::Coordinate => match s {
                 "Abs" => Some(Coordinate::Abs),
                 "Rel" => Some(Coordinate::Rel),
@@ -246,9 +263,6 @@ impl Type {
             }
             .map(|x| [x as u8])
             .map(Box::from),
-            Self::List { .. } => None,  // Not yet supported for literals
-            Self::Array { .. } => None, // Not yet supported for literals
-            Self::Tuple { .. } => None, // Not yet supported for literals
         }
     }
 
@@ -262,7 +276,7 @@ impl Type {
                 } else if s.starts_with('#') {
                     Some(Self::Color)
                 } else if s.starts_with('"') && s.ends_with('"') {
-                    Some(Self::String)
+                    Some(Self::Str)
                 } else if s.parse::<KeyboardKey>().is_ok() {
                     Some(Self::Key)
                 } else if s.parse::<MouseButton>().is_ok() {
@@ -275,49 +289,8 @@ impl Type {
     }
 }
 
-#[derive(Debug, Clone)]
-#[allow(non_snake_case)]
-pub enum Instruction {
-    Set {
-        T: Type,
-        /// [`T`][`Instruction::Set::T`]
-        dest: AddressRange,
-        /// [`T`][`Instruction::Set::T`]
-        src: Source,
-    },
-    GetPixel {
-        /// [`Type::Color`]
-        dest: AddressRange,
-        /// [`Type::Int`]
-        x: Source,
-        /// [`Type::Int`]
-        y: Source,
-    },
-    Print {
-        T: Type,
-        /// [`T`][`Instruction::Print::T`]
-        what: Source,
-    },
-    MoveMouse {
-        /// [`Type::Coordinate`]
-        coord: Source,
-        /// [`Type::Int`]
-        x: Source,
-        /// [`Type::Int`]
-        y: Source,
-    },
-    Key {
-        /// [`Type::Key`]
-        key: Source,
-    },
-    Button {
-        /// [`Type::Button`]
-        button: Source,
-    },
-}
-
 impl Instruction {
-    pub fn run(
+    fn run(
         &self,
         input: &mut Input,
         screen: &mut Screen,
@@ -333,22 +306,106 @@ impl Instruction {
                     Source::Address(src) => ram.copy(*dest, *src)?,
                 }
             }
-            Self::GetPixel { dest, x, y } => todo!(),
+            Self::Add { dest, lhs, rhs } => {
+                let lhs = *lhs.get_as::<i32>(ram)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                *ram.get_mut_as(*dest)? = lhs.wrapping_add(rhs);
+            }
+            Self::Sub { dest, lhs, rhs } => {
+                let lhs = *lhs.get_as::<i32>(ram)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                *ram.get_mut_as(*dest)? = lhs.wrapping_sub(rhs);
+            }
+            Self::Mul { dest, lhs, rhs } => {
+                let lhs = *lhs.get_as::<i32>(ram)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                *ram.get_mut_as(*dest)? = lhs.wrapping_mul(rhs);
+            }
+            Self::Div { dest, lhs, rhs } => {
+                let lhs = *lhs.get_as::<i32>(ram)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                if rhs != 0 {
+                    *ram.get_mut_as(*dest)? = lhs.wrapping_div(rhs);
+                } else {
+                    return Err(RuntimeError::DivByZero);
+                }
+            }
+            Self::Rem { dest, lhs, rhs } => {
+                let lhs = *lhs.get_as::<i32>(ram)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                if rhs != 0 {
+                    *ram.get_mut_as(*dest)? = lhs.wrapping_rem(rhs);
+                } else {
+                    return Err(RuntimeError::DivByZero);
+                }
+            }
+            Self::AddAssign { dest, rhs } => {
+                let lhs = *ram.get_as::<i32>(*dest)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                *ram.get_mut_as(*dest)? = lhs.wrapping_add(rhs);
+            }
+            Self::SubAssign { dest, rhs } => {
+                let lhs = *ram.get_as::<i32>(*dest)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                *ram.get_mut_as(*dest)? = lhs.wrapping_sub(rhs);
+            }
+            Self::MulAssign { dest, rhs } => {
+                let lhs = *ram.get_as::<i32>(*dest)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                *ram.get_mut_as(*dest)? = lhs.wrapping_mul(rhs);
+            }
+            Self::DivAssign { dest, rhs } => {
+                let lhs = *ram.get_as::<i32>(*dest)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                if rhs != 0 {
+                    *ram.get_mut_as(*dest)? = lhs.wrapping_div(rhs);
+                } else {
+                    return Err(RuntimeError::DivByZero);
+                }
+            }
+            Self::RemAssign { dest, rhs } => {
+                let lhs = *ram.get_as::<i32>(*dest)?;
+                let rhs = *rhs.get_as::<i32>(ram)?;
+                if rhs != 0 {
+                    *ram.get_mut_as(*dest)? = lhs.wrapping_rem(rhs);
+                } else {
+                    return Err(RuntimeError::DivByZero);
+                }
+            }
+            Self::GetPixel { dest, x, y } => {
+                let x = *x.get_as::<i32>(ram)?;
+                let y = *y.get_as::<i32>(ram)?;
+                let color = unsafe { screen.get_pixel(x, y) }
+                    .map_err(RuntimeError::ScreenError)?
+                    .to_rgb();
+                *ram.get_mut_as(*dest)? = color;
+            }
             Self::Print { T, what } => match T {
                 Type::Bool => println!("{}", what.get_as::<bool>(ram)?),
                 Type::Int => println!("{}", what.get_as::<i32>(ram)?),
-                Type::String => println!("{}", what.get_as_str(ram)?),
+                Type::Str => println!("{}", what.get_as_str(ram)?),
                 Type::Color => println!("{:?}", what.get_as::<ColorRGB>(ram)?),
                 Type::Key => println!("{:?}", what.get_as::<Key>(ram)?),
                 Type::Button => println!("{:?}", what.get_as::<Button>(ram)?),
+                Type::Action => println!("{:?}", what.get_as::<Direction>(ram)?),
                 Type::Coordinate => println!("{:?}", what.get_as::<Coordinate>(ram)?),
-                Type::List { ty } => todo!(),
-                Type::Array { ty, count } => todo!(),
-                Type::Tuple { tys } => todo!(),
             },
-            Self::MoveMouse { coord, x, y } => todo!(),
-            Self::Key { key } => todo!(),
-            Self::Button { button } => todo!(),
+            Self::MoveMouse { coord, x, y } => {
+                let coord = *coord.get_as::<Coordinate>(ram)?;
+                let x = *x.get_as::<i32>(ram)?;
+                let y = *y.get_as::<i32>(ram)?;
+                input.move_mouse(x, y, coord)?;
+            }
+            Self::Key { action, key } => {
+                let action = *action.get_as::<Direction>(ram)?;
+                let key = *key.get_as::<Key>(ram)?;
+                input.key(key, action)?;
+            }
+            Self::Button { action, button } => {
+                let action = *action.get_as::<Direction>(ram)?;
+                let button = *button.get_as::<Button>(ram)?;
+                input.button(button, action)?;
+            }
         }
         Ok(())
     }

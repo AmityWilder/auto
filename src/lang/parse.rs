@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::lang::{
     address::{Address, AddressRange, UAddr},
-    run::{Instruction, Source, Type},
+    run::{Source, Type},
 };
 
 #[derive(Debug, Clone)]
@@ -31,8 +31,7 @@ pub enum ParseErrorType {
         missing: &'static str,
     },
     TypeMismatch {
-        instruction: &'static str,
-        arg: &'static str,
+        arg: String,
         expect: Type,
         actual: Type,
     },
@@ -83,14 +82,15 @@ impl std::fmt::Display for ParseError {
                 "not enough arguments for `{ins}`. missing argument for `{missing}`"
             ),
             TypeMismatch {
-                instruction,
                 arg,
                 expect,
                 actual,
-            } => write!(
-                f,
-                "type mismatch for argument `{arg}` of `{instruction}`. found: {actual:?}, expected: {expect:?}"
-            ),
+            } => {
+                write!(
+                    f,
+                    "type mismatch: `{arg}` is {actual:?}, expected {expect:?}"
+                )
+            }
             OutOfMemory {
                 requested: Some(requested),
             } => write!(f, "out of memory. requested bytes: {requested}"),
@@ -106,11 +106,17 @@ impl std::error::Error for ParseError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ArgDirection {
-    /// Can accept literals. Type can be deduced from this.
+    /// Can accept literals.
+    /// Cannot create a new variable.
+    /// Can be used to deduce generic types.
     In,
-    /// Must be an existing variable. Type can be deduced from this if initialized.
+    /// Cannot accept literals.
+    /// Cannot create a new variable.
+    /// Can be used to deduce generic types.
     InOut,
-    /// May create a new variable, if none exists. Type cannot be deduced from this.
+    /// Cannot accept literals.
+    /// Can create a new variable.
+    /// Cannot be used to deduce generic types.
     Out,
 }
 
@@ -172,14 +178,25 @@ impl VarTable {
                 }
             }
 
-            InOut => self
-                .vars
-                .get(arg)
-                .map(|var| Source::Address(var.1))
-                .ok_or_else(|| ParseErrorType::UnknownVariable(arg.to_string())),
+            InOut => {
+                let (var_ty, addr) = self
+                    .vars
+                    .get(arg)
+                    .ok_or_else(|| ParseErrorType::UnknownVariable(arg.to_string()))?;
+
+                if var_ty == ty {
+                    Ok(Source::Address(*addr))
+                } else {
+                    Err(ParseErrorType::TypeMismatch {
+                        arg: arg.to_string(),
+                        expect: ty.clone(),
+                        actual: var_ty.clone(),
+                    })
+                }
+            }
 
             Out => {
-                if !self.vars.contains_key(arg) {
+                if self.vars.get(arg).is_none_or(|(var_ty, _)| var_ty != ty) {
                     let size = ty
                         .size()
                         .map_err(|_| ParseErrorType::OutOfMemory { requested: None })?;
@@ -198,6 +215,7 @@ impl VarTable {
     }
 }
 
+#[derive(Debug)]
 enum TypeArg {
     Static(Type),
     /// ID of the generic within the function
@@ -240,16 +258,13 @@ fn get_args(
                 .iter()
                 .zip(args.iter().copied())
                 .map(|((direction, _, ty), arg)| {
-                    stack.lookup(
-                        *direction,
-                        arg,
-                        match ty {
-                            TypeArg::Static(ty) => ty,
-                            &TypeArg::Generic(id) => generics[id]
-                                .as_ref()
-                                .ok_or(ParseErrorType::TypeDeductionFailed(id))?,
-                        },
-                    )
+                    let ty = match ty {
+                        TypeArg::Static(ty) => ty,
+                        &TypeArg::Generic(id) => generics[id]
+                            .as_ref()
+                            .ok_or(ParseErrorType::TypeDeductionFailed(id))?,
+                    };
+                    stack.lookup(*direction, arg, ty)
                 })
                 .collect::<Result<Vec<_>, _>>()
         }
@@ -257,50 +272,157 @@ fn get_args(
 }
 
 macro_rules! instructions {
-    (
-        stack: $stack:ident;
-        args: $args:ident;
-        match $ins:ident {
-            $($name:ident => $instruction:ident$(<$($generic:ident),+>)?($( [$dir:ident] $arg:ident: $type:expr ),*);)*
+    ($($name:literal => $Variant:ident$(<$($Generic:ident),+>)?($( $(#[$m:meta])* [$dir:ident] $arg:ident: $typekind:ident($type:expr) ),*);)*) => {
+        #[derive(Debug, Clone)]
+        #[allow(non_snake_case)]
+        pub enum Instruction {
+            $($Variant {
+                $($(
+                    $Generic: Type,
+                )+)?
+                $(
+                    #[doc = concat!("[`", stringify!($dir), "`](ArgDirection::", stringify!($dir), ") [`", stringify!($type), "`]")]
+                    $(#[$m])*
+                    $arg: instructions!(@@ [$dir])
+                ),*
+            }),*
         }
-    ) => {
-        match $ins {
-            $(
-                stringify!($name) => {
-                    const GENERICS: [&str; instructions!(# $([$(stringify!($generic)),+].len())?)] = [$($(stringify!($generic)),+)?];
-                    let mut generics = [const { None }; GENERICS.len()];
-                    $(
-                    #[allow(non_snake_case)]
-                    let [$($generic),+] = std::array::from_fn(|i| i);
-                    )?
-                    let Ok([$(instructions!(@ [$dir] $arg)),*]) = <[Source; _]>::try_from(get_args(
-                        &mut $stack,
-                        stringify!($name),
-                        &mut generics,
-                        &[$((ArgDirection::$dir, stringify!($arg), $type)),*],
-                        &$args,
-                    )?) else {
-                        panic!(
-                            "get_args should always produce the requested number & kind of arguments"
-                        )
-                    };
-                    $(
-                    #[allow(non_snake_case)]
-                    let [$($generic),+] = generics.map(|x| x.expect("should have returned with error during type deduction"));
-                    )?
-                    Ok(Instruction::$instruction { $($($generic,)+)? $($arg),* })
-                }
-            )*
 
-            _ => Err(ParseErrorType::UnknownInstruction($ins.to_string())),
+        impl Instruction {
+            fn from_str<'a>(
+                stack: &mut VarTable,
+                ins: &'a str,
+                args: &[&'a str],
+            ) -> Result<Instruction, ParseErrorType> {
+                use TypeArg::*;
+                match ins {
+                    $($name => {
+                        const GENERICS: [&str; instructions!(# $([$(stringify!($Generic)),+].len())?)] = [$($(stringify!($Generic)),+)?];
+                        let mut generics = [const { None }; GENERICS.len()];
+                        $(
+                        #[allow(non_snake_case)]
+                        let [$($Generic),+] = std::array::from_fn(|i| i);
+                        )?
+                        let Ok([$(instructions!(@ [$dir] $arg)),*]) = <[Source; _]>::try_from(get_args(
+                            stack,
+                            $name,
+                            &mut generics,
+                            &[$((ArgDirection::$dir, stringify!($arg), $typekind($type))),*],
+                            &args,
+                        )?) else {
+                            panic!(
+                                "get_args should always produce the requested number & kind of arguments"
+                            )
+                        };
+                        $(
+                        #[allow(non_snake_case)]
+                        let [$($Generic),+] = generics.map(|x| x.expect("should have returned with error during type deduction"));
+                        $(println!("deduced {} as {:?}", stringify!($Generic), $Generic);)+
+                        )?
+                        Ok(Instruction::$Variant { $($($Generic,)+)? $($arg),* })
+                    })*
+                    _ => Err(ParseErrorType::UnknownInstruction(ins.to_string())),
+                }
+            }
+        }
+
+        impl std::fmt::Display for Instruction {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $(Self::$Variant { $($($Generic,)+)? $($arg),* } => {
+                        f.write_str(stringify!($Variant))?;
+                        $(write!(f, "<{}>", [$(format!("{}: {:?}", stringify!($Generic), $Generic)),+].join(", "))?;)?
+                        write!(f, "({})", [$(format!("[{}] {} {}: {}", stringify!($dir), stringify!($type), stringify!($arg), $arg)),*].join(", "))?;
+                        Ok(())
+                    }),*
+                }
+            }
         }
     };
 
     (@ [In] $arg:ident) => { $arg };
     (@ [$dir:ident] $arg:ident) => { Source::Address($arg) };
 
+    (@@ [In]) => { Source };
+    (@@ [$dir:ident]) => { AddressRange };
+
     (# $($tokens:tt)+) => { $($tokens)+ };
     (# ) => { 0 };
+}
+
+instructions! {
+    "set" => Set<T>(
+        /// The variable to store to
+        [Out] dest: Generic(T),
+        /// The value to set with
+        [In] src: Generic(T)
+    );
+    "+" => Add(
+        [InOut] dest: Static(Type::Int),
+        [In] lhs: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "-" => Sub(
+        [InOut] dest: Static(Type::Int),
+        [In] lhs: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "*" => Mul(
+        [InOut] dest: Static(Type::Int),
+        [In] lhs: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "/" => Div(
+        [InOut] dest: Static(Type::Int),
+        [In] lhs: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "%" => Rem(
+        [InOut] dest: Static(Type::Int),
+        [In] lhs: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "+=" => AddAssign(
+        [InOut] dest: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "-=" => SubAssign(
+        [InOut] dest: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "*=" => MulAssign(
+        [InOut] dest: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "/=" => DivAssign(
+        [InOut] dest: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "%=" => RemAssign(
+        [InOut] dest: Static(Type::Int),
+        [In] rhs: Static(Type::Int)
+    );
+    "getpx" => GetPixel(
+        [Out] dest: Static(Type::Color),
+        [In] x: Static(Type::Int),
+        [In] y: Static(Type::Int)
+    );
+    "print" => Print<T>(
+        [In] what: Generic(T)
+    );
+    "mouse" => MoveMouse(
+        [In] coord: Static(Type::Coordinate),
+        [In] x: Static(Type::Int),
+        [In] y: Static(Type::Int)
+    );
+    "kb" => Key(
+        [In] action: Static(Type::Action),
+        [In] key: Static(Type::Key)
+    );
+    "mb" => Button(
+        [In] action: Static(Type::Action),
+        [In] button: Static(Type::Button)
+    );
 }
 
 impl std::str::FromStr for Program {
@@ -310,52 +432,22 @@ impl std::str::FromStr for Program {
         let mut stack = VarTable::new(4096);
         let mut args = Vec::new();
         s.lines()
+            .map(|line| line[..line.find('#').unwrap_or(line.len())].trim())
             .enumerate()
             .filter(|(_, line)| !line.is_empty())
             .map(|(n, line)| -> Result<Instruction, ParseError> {
-                (|| {
-                    use TypeArg::*;
-
-                    let mut it = line.split_whitespace();
-                    let ins = it.next().expect("should be guaranteed by filter");
-                    args.clear();
-                    args.extend(it);
-
-                    instructions! {
-                        stack: stack;
-                        args: args;
-                        match ins {
-                            set => Set<T>(
-                                [Out] dest: Generic(T),
-                                [In] src: Generic(T)
-                            );
-                            getpx => GetPixel(
-                                [Out] dest: Static(Type::Color),
-                                [In] x: Static(Type::Int),
-                                [In] y: Static(Type::Int)
-                            );
-                            print => Print<T>(
-                                [In] what: Generic(T)
-                            );
-                            mouse => MoveMouse(
-                                [In] coord: Static(Type::Coordinate),
-                                [In] x: Static(Type::Int),
-                                [In] y: Static(Type::Int)
-                            );
-                            kb => Key(
-                                [In] key: Static(Type::Key)
-                            );
-                            mb => Button(
-                                [In] button: Static(Type::Button)
-                            );
-                        }
-                    }
-                })()
-                .map_err(|ty| ParseError {
-                    ty,
-                    line: n,
-                    code: line.to_string(),
-                })
+                let mut it = line.split_whitespace();
+                let ins = it.next().expect("should be guaranteed by filter");
+                args.clear();
+                args.extend(it);
+                println!("line {}: `{line}`", n + 1);
+                Instruction::from_str(&mut stack, ins, &args)
+                    .inspect(|instruction| println!("parsed: {instruction}"))
+                    .map_err(|ty| ParseError {
+                        ty,
+                        line: n,
+                        code: line.to_string(),
+                    })
             })
             .collect::<Result<Vec<Instruction>, ParseError>>()
             .map(Program)

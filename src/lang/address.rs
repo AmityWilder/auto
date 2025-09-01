@@ -1,7 +1,6 @@
 use crate::lang::run::RuntimeError;
 
 pub type UAddr = u32;
-pub type IAddr = i32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address(pub UAddr);
@@ -47,7 +46,7 @@ impl Address {
             .0
             .checked_add(size)
             .map(Address)
-            .ok_or_else(|| RuntimeError::AddressOverflow(start, size))?;
+            .ok_or(RuntimeError::AddressOverflow(start, size))?;
         // SAFETY: Would have returned an error if overflow occurred
         debug_assert!(end >= start);
         Ok(unsafe { AddressRange::new_unchecked(start, end) })
@@ -132,6 +131,7 @@ impl AddressRange {
 
     #[inline]
     pub const fn size(self) -> UAddr {
+        debug_assert!(self.end.0 >= self.start.0, "invariant broken");
         // SAFETY: Guaranteed by type invariant
         unsafe { self.end.0.unchecked_sub(self.start.0) }
     }

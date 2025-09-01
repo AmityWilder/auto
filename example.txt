@@ -1,2 +1,12 @@
 set x 5
-print x
+*= x 10
+set y x
++= y 20
+
+getpx color x y
+print color
+
+# mouse Abs x y
+# kb Press Shift
+# kb Click X
+# kb Release Shift
