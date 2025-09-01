@@ -2,6 +2,7 @@
 #![cfg(not(target_pointer_width = "16"))]
 
 mod address;
+pub mod instructions;
 mod memory;
 pub mod parse;
 pub mod run;

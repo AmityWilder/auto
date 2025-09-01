@@ -1,15 +1,18 @@
+use colored::Colorize;
 use std::collections::HashMap;
 
 use crate::lang::{
     address::{Address, AddressRange, UAddr},
+    instructions::{ArgDirection, Instruction},
     memory::Source,
     types::Type,
 };
 
 #[derive(Debug, Clone)]
-pub struct Program(Vec<Instruction>);
+pub struct Program(Box<[Instruction]>);
 
 impl Program {
+    #[inline]
     pub fn line(&self, n: UAddr) -> Option<&Instruction> {
         self.0.get(n as usize)
     }
@@ -21,16 +24,16 @@ pub enum ParseErrorType {
     UnknownVariable(String),
     InvalidLiteral(Type, String),
     UnknownImmType(String),
-    TypeDeductionFailed(usize),
-    TooManyArgs {
-        instruction: &'static str,
-        expect: usize,
-        actual: usize,
-    },
-    MissingArgs {
-        instruction: &'static str,
-        missing: &'static str,
-    },
+    TypeDeductionFailed(&'static str),
+    // TooManyArgs {
+    //     instruction: &'static str,
+    //     expect: usize,
+    //     actual: usize,
+    // },
+    // MissingArgs {
+    //     instruction: &'static str,
+    //     missing: &'static str,
+    // },
     TypeMismatch {
         arg: String,
         expect: Type,
@@ -65,23 +68,23 @@ impl std::fmt::Display for ParseError {
                 )
             }
             TypeDeductionFailed(id) => {
-                write!(f, "could not deduce the type of generic argument {id}")
+                write!(f, "could not deduce the type of generic argument `{id}`")
             }
-            TooManyArgs {
-                instruction: ins,
-                expect,
-                actual,
-            } => write!(
-                f,
-                "`{ins}` takes {expect} arguments but {actual} were supplied"
-            ),
-            MissingArgs {
-                instruction: ins,
-                missing,
-            } => write!(
-                f,
-                "not enough arguments for `{ins}`. missing argument for `{missing}`"
-            ),
+            // TooManyArgs {
+            //     instruction: ins,
+            //     expect,
+            //     actual,
+            // } => write!(
+            //     f,
+            //     "`{ins}` takes {expect} arguments but {actual} were supplied"
+            // ),
+            // MissingArgs {
+            //     instruction: ins,
+            //     missing,
+            // } => write!(
+            //     f,
+            //     "not enough arguments for `{ins}`. missing argument for `{missing}`"
+            // ),
             TypeMismatch {
                 arg,
                 expect,
@@ -105,23 +108,7 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum ArgDirection {
-    /// Can accept literals.
-    /// Cannot create a new variable.
-    /// Can be used to deduce generic types.
-    In,
-    /// Cannot accept literals.
-    /// Cannot create a new variable.
-    /// Can be used to deduce generic types.
-    InOut,
-    /// Cannot accept literals.
-    /// Can create a new variable.
-    /// Cannot be used to deduce generic types.
-    Out,
-}
-
-struct VarTable {
+pub(super) struct VarTable {
     vars: HashMap<String, (Type, AddressRange)>,
     available: AddressRange,
 }
@@ -136,6 +123,19 @@ impl VarTable {
         }
     }
 
+    #[inline]
+    pub fn get(&self, var: &str) -> Option<&(Type, AddressRange)> {
+        self.vars.get(var)
+    }
+
+    #[inline]
+    pub fn get_or_err(&self, var: &str) -> Result<&(Type, AddressRange), ParseErrorType> {
+        self.get(var)
+            .ok_or_else(|| ParseErrorType::UnknownVariable(var.to_string()))
+    }
+
+    /// [`None`]: Type is unknown (but not necessarily invalid)
+    /// [`Err`]: Type is invalid
     pub fn typecheck(
         &self,
         direction: ArgDirection,
@@ -149,7 +149,7 @@ impl VarTable {
                     self.typecheck(InOut, arg)
                 } else {
                     Some(
-                        Type::try_deduce_imm(arg)
+                        Type::try_deduce_imm(arg, self)
                             .ok_or_else(|| ParseErrorType::UnknownImmType(arg.to_string())),
                     )
                 }
@@ -161,32 +161,21 @@ impl VarTable {
         }
     }
 
-    pub fn lookup(
+    pub fn lookup_out(
         &mut self,
         direction: ArgDirection,
         arg: &str,
         ty: &Type,
-    ) -> Result<Source, ParseErrorType> {
+    ) -> Result<AddressRange, ParseErrorType> {
         use ArgDirection::*;
         match direction {
-            In => {
-                if arg.starts_with(|ch: char| ch == '_' || ch.is_ascii_lowercase()) {
-                    self.lookup(InOut, arg, ty)
-                } else {
-                    ty.try_parse_imm(arg)
-                        .map(Source::Immediate)
-                        .ok_or_else(|| ParseErrorType::InvalidLiteral(ty.clone(), arg.to_string()))
-                }
-            }
+            In => unimplemented!(),
 
             InOut => {
-                let (var_ty, addr) = self
-                    .vars
-                    .get(arg)
-                    .ok_or_else(|| ParseErrorType::UnknownVariable(arg.to_string()))?;
+                let (var_ty, addr) = self.get_or_err(arg)?;
 
                 if var_ty == ty {
-                    Ok(Source::Address(*addr))
+                    Ok(*addr)
                 } else {
                     Err(ParseErrorType::TypeMismatch {
                         arg: arg.to_string(),
@@ -210,228 +199,89 @@ impl VarTable {
                     self.available = available;
                     self.vars.insert(arg.to_string(), (ty.clone(), addr));
                 }
-                self.lookup(InOut, arg, ty)
+                self.lookup_out(InOut, arg, ty)
             }
+        }
+    }
+
+    pub fn lookup(
+        &mut self,
+        direction: ArgDirection,
+        arg: &str,
+        ty: &Type,
+    ) -> Result<Source, ParseErrorType> {
+        use ArgDirection::*;
+        match direction {
+            In => {
+                if arg.starts_with(|ch: char| ch == '_' || ch.is_ascii_lowercase()) {
+                    self.lookup_out(InOut, arg, ty).map(Source::Address)
+                } else {
+                    ty.try_parse_imm(arg, self)
+                        .map(Source::Immediate)
+                        .ok_or_else(|| ParseErrorType::InvalidLiteral(ty.clone(), arg.to_string()))
+                }
+            }
+
+            InOut | Out => self.lookup_out(direction, arg, ty).map(Source::Address),
         }
     }
 }
 
-#[derive(Debug)]
-enum TypeArg {
-    Static(Type),
-    /// ID of the generic within the function
-    Generic(usize),
-}
-
-fn get_args(
-    stack: &mut VarTable,
-    instruction: &'static str,
-    generics: &mut [Option<Type>],
-    expect_args: &[(ArgDirection, &'static str, TypeArg)],
-    args: &[&str],
-) -> Result<Vec<Source>, ParseErrorType> {
-    match args.len().cmp(&expect_args.len()) {
-        std::cmp::Ordering::Greater => Err(ParseErrorType::TooManyArgs {
-            instruction,
-            expect: expect_args.len(),
-            actual: args.len(),
-        }),
-        std::cmp::Ordering::Less => Err(ParseErrorType::MissingArgs {
-            instruction,
-            missing: expect_args[args.len()].1,
-        }),
-        std::cmp::Ordering::Equal => {
-            for ((dir, tyid), arg) in
-                expect_args
-                    .iter()
-                    .zip(args.iter().copied())
-                    .filter_map(|((d, _, t), a)| match t {
-                        &TypeArg::Generic(id) => Some(((*d, id), a)),
-                        _ => None,
-                    })
-            {
-                if let Some(ty) = stack.typecheck(dir, arg) {
-                    generics[tyid] = Some(ty?);
+impl Program {
+    fn lex_line<'a>(
+        line_number: usize,
+        s: &'a str,
+        ins: &mut Option<&'a str>,
+        args: &mut Vec<&'a str>,
+    ) {
+        let (mut code, comment) = s.split_at(s.find('#').unwrap_or(s.len()));
+        let mut it = std::iter::from_fn(|| {
+            let mid;
+            if code.starts_with('"') {
+                let mut is_escaped = false;
+                'find_mid: {
+                    for (i, ch) in code.char_indices().skip(1) {
+                        if !is_escaped {
+                            if ch == '\\' {
+                                is_escaped = true;
+                            } else if ch == '"' {
+                                mid = i + const { '"'.len_utf8() };
+                                break 'find_mid;
+                            }
+                        } else {
+                            is_escaped = false;
+                        }
+                    }
+                    mid = code.len();
+                }
+            } else {
+                mid = code.find(char::is_whitespace).unwrap_or(code.len());
+            }
+            (mid > 0).then(|| {
+                let (start, rest) = code.split_at(mid);
+                code = rest.trim_start();
+                start
+            })
+        });
+        *ins = it.next();
+        args.clear();
+        args.extend(it);
+        if false {
+            print!(
+                "{:>4} |     {}",
+                line_number + 1,
+                ins.unwrap_or_default().yellow(),
+            );
+            for arg in args {
+                if arg.starts_with(|ch: char| ch == '_' || ch.is_ascii_lowercase()) {
+                    print!(" {}", arg.purple());
+                } else {
+                    print!(" {}", arg.blue());
                 }
             }
-
-            expect_args
-                .iter()
-                .zip(args.iter().copied())
-                .map(|((direction, _, ty), arg)| {
-                    let ty = match ty {
-                        TypeArg::Static(ty) => ty,
-                        &TypeArg::Generic(id) => generics[id]
-                            .as_ref()
-                            .ok_or(ParseErrorType::TypeDeductionFailed(id))?,
-                    };
-                    stack.lookup(*direction, arg, ty)
-                })
-                .collect::<Result<Vec<_>, _>>()
+            println!(" {}", comment.green());
         }
     }
-}
-
-macro_rules! instructions {
-    ($($name:literal => $Variant:ident$(<$($Generic:ident),+>)?($( $(#[$m:meta])* [$dir:ident] $arg:ident: $typekind:ident($type:expr) ),*);)*) => {
-        #[derive(Debug, Clone)]
-        #[allow(non_snake_case)]
-        pub enum Instruction {
-            $($Variant {
-                $($(
-                    $Generic: Type,
-                )+)?
-                $(
-                    #[doc = concat!("[`", stringify!($dir), "`](ArgDirection::", stringify!($dir), ") [`", stringify!($type), "`]")]
-                    $(#[$m])*
-                    $arg: instructions!(@@ [$dir])
-                ),*
-            }),*
-        }
-
-        impl Instruction {
-            fn from_str<'a>(
-                stack: &mut VarTable,
-                ins: &'a str,
-                args: &[&'a str],
-            ) -> Result<Instruction, ParseErrorType> {
-                use TypeArg::*;
-                match ins {
-                    $($name => {
-                        const GENERICS: [&str; instructions!(# $([$(stringify!($Generic)),+].len())?)] = [$($(stringify!($Generic)),+)?];
-                        let mut generics = [const { None }; GENERICS.len()];
-                        $(
-                        #[allow(non_snake_case)]
-                        let [$($Generic),+] = std::array::from_fn(|i| i);
-                        )?
-                        let Ok([$(instructions!(@ [$dir] $arg)),*]) = <[Source; _]>::try_from(get_args(
-                            stack,
-                            $name,
-                            &mut generics,
-                            &[$((ArgDirection::$dir, stringify!($arg), $typekind($type))),*],
-                            &args,
-                        )?) else {
-                            panic!(
-                                "get_args should always produce the requested number & kind of arguments"
-                            )
-                        };
-                        $(
-                        #[allow(non_snake_case)]
-                        let [$($Generic),+] = generics.map(|x| x.expect("should have returned with error during type deduction"));
-                        $(println!("deduced {} as {:?}", stringify!($Generic), $Generic);)+
-                        )?
-                        Ok(Instruction::$Variant { $($($Generic,)+)? $($arg),* })
-                    })*
-                    _ => Err(ParseErrorType::UnknownInstruction(ins.to_string())),
-                }
-            }
-        }
-
-        impl std::fmt::Display for Instruction {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self {
-                    $(Self::$Variant { $($($Generic,)+)? $($arg),* } => {
-                        f.write_str(stringify!($Variant))?;
-                        $(write!(f, "<{}>", [$(format!("{}: {:?}", stringify!($Generic), $Generic)),+].join(", "))?;)?
-                        write!(f, "({})", [$(format!("[{}] {} {}: {}", stringify!($dir), stringify!($type), stringify!($arg), $arg)),*].join(", "))?;
-                        Ok(())
-                    }),*
-                }
-            }
-        }
-    };
-
-    (@ [In] $arg:ident) => { $arg };
-    (@ [$dir:ident] $arg:ident) => { Source::Address($arg) };
-
-    (@@ [In]) => { Source };
-    (@@ [$dir:ident]) => { AddressRange };
-
-    (# $($tokens:tt)+) => { $($tokens)+ };
-    (# ) => { 0 };
-}
-
-instructions! {
-    "set" => Set<T>(
-        /// The variable to store to
-        [Out] dest: Generic(T),
-        /// The value to set with
-        [In] src: Generic(T)
-    );
-    "jumpif" => If(
-        /// The value to set with
-        [In] cond: Static(Type::Bool),
-        [In] jump: Static(Type::Label)
-    );
-    "+" => Add(
-        [InOut] dest: Static(Type::Int),
-        [In] lhs: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "-" => Sub(
-        [InOut] dest: Static(Type::Int),
-        [In] lhs: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "*" => Mul(
-        [InOut] dest: Static(Type::Int),
-        [In] lhs: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "/" => Div(
-        [InOut] dest: Static(Type::Int),
-        [In] lhs: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "%" => Rem(
-        [InOut] dest: Static(Type::Int),
-        [In] lhs: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "+=" => AddAssign(
-        [InOut] dest: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "-=" => SubAssign(
-        [InOut] dest: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "*=" => MulAssign(
-        [InOut] dest: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "/=" => DivAssign(
-        [InOut] dest: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "%=" => RemAssign(
-        [InOut] dest: Static(Type::Int),
-        [In] rhs: Static(Type::Int)
-    );
-    "getpx" => GetPixel(
-        [Out] dest: Static(Type::Color),
-        [In] x: Static(Type::Int),
-        [In] y: Static(Type::Int)
-    );
-    "print" => Print<T>(
-        [In] what: Generic(T)
-    );
-    "wait" => Wait(
-        [In] ms: Static(Type::Int)
-    );
-    "mouse" => MoveMouse(
-        [In] coord: Static(Type::Coordinate),
-        [In] x: Static(Type::Int),
-        [In] y: Static(Type::Int)
-    );
-    "kb" => Key(
-        [In] action: Static(Type::Action),
-        [In] key: Static(Type::Key)
-    );
-    "mb" => Button(
-        [In] action: Static(Type::Action),
-        [In] button: Static(Type::Button)
-    );
 }
 
 impl std::str::FromStr for Program {
@@ -441,24 +291,21 @@ impl std::str::FromStr for Program {
         let mut stack = VarTable::new(4096);
         let mut args = Vec::new();
         s.lines()
-            .map(|line| line[..line.find('#').unwrap_or(line.len())].trim())
             .enumerate()
-            .filter(|(_, line)| !line.is_empty())
-            .map(|(n, line)| -> Result<Instruction, ParseError> {
-                let mut it = line.split_whitespace();
-                let ins = it.next().expect("should be guaranteed by filter");
-                args.clear();
-                args.extend(it);
-                println!("line {}: `{line}`", n + 1);
-                Instruction::from_str(&mut stack, ins, &args)
-                    .inspect(|instruction| println!("parsed: {instruction}"))
-                    .map_err(|ty| ParseError {
-                        ty,
-                        line: n,
-                        code: line.to_string(),
-                    })
+            .filter_map(|(n, line)| -> Option<Result<Instruction, ParseError>> {
+                let mut ins = None;
+                Self::lex_line(n, line, &mut ins, &mut args);
+                ins.map(|ins| {
+                    Instruction::from_str(&mut stack, ins, &args)
+                        .inspect(|instruction| println!("parsed: {instruction}"))
+                        .map_err(|ty| ParseError {
+                            ty,
+                            line: n,
+                            code: line.to_string(),
+                        })
+                })
             })
             .collect::<Result<Vec<Instruction>, ParseError>>()
-            .map(Program)
+            .map(|vec| Program(vec.into_boxed_slice()))
     }
 }

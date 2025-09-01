@@ -2,8 +2,9 @@ use crate::{
     input::{Button, Coordinate, Input, InputError, Key},
     lang::{
         address::{Address, AddressRange, UAddr},
+        instructions::Instruction,
         memory::{Memory, Source},
-        parse::{Instruction, Program},
+        parse::Program,
         types::Type,
     },
     screen::{ColorRGB, Screen, ScreenError},
@@ -17,6 +18,7 @@ pub enum RuntimeError {
         addr: AddressRange,
         possible: AddressRange,
     },
+    DerefNonPointer(Type),
     TypeSizeOverflow(Type),
     UnionSizeOverflow(u128),
     AddressOverflow(Address, UAddr),
@@ -55,6 +57,9 @@ impl std::fmt::Display for RuntimeError {
                     f,
                     "attempted to dereference the invalid address range: {addr} (ram is {possible})"
                 )
+            }
+            Self::DerefNonPointer(ty) => {
+                write!(f, "attempted to dereference a non-pointer: {ty:?}")
             }
             Self::TypeSizeOverflow(ty) => {
                 write!(
@@ -105,40 +110,47 @@ impl Instruction {
             Self::Set { T, dest, src } => {
                 let type_size = T.size()?;
                 debug_assert_eq!(dest.size(), type_size);
-                debug_assert_eq!(src.size(), type_size);
+                assert_eq!(dest.size(), src.size(), "dest = {dest}, src = {src}");
                 match src {
-                    Source::Immediate(val) => ram.get_mut(*dest)?.copy_from_slice(val),
+                    Source::Immediate(val) => dest.get_mut(ram)?.copy_from_slice(val),
                     Source::Address(src) => ram.copy(*dest, *src)?,
                 }
             }
-            Self::If { cond, jump } => {
-                let cond = *cond.get_as::<bool>(ram)?;
-                let jump = *jump.get_as::<UAddr>(ram)?;
-                if !cond {
-                    *counter = jump;
-                    return Ok(());
-                }
+            Self::Deref { T: _, dest, src } => {
+                let src = *src.get_as::<AddressRange>(ram)?;
+                let dest = *dest;
+
+                assert!(dest.size() <= src.size(), "dest = {dest}, src = {src}");
+                ram.copy(dest, src.split_at(dest.size()).expect("already checked").0)?;
             }
             Self::Add { dest, lhs, rhs } => {
                 let lhs = *lhs.get_as::<i32>(ram)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
-                *ram.get_mut_as(*dest)? = lhs.wrapping_add(rhs);
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
+                *dest = lhs.wrapping_add(rhs);
             }
             Self::Sub { dest, lhs, rhs } => {
                 let lhs = *lhs.get_as::<i32>(ram)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
-                *ram.get_mut_as(*dest)? = lhs.wrapping_sub(rhs);
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
+                *dest = lhs.wrapping_sub(rhs);
             }
             Self::Mul { dest, lhs, rhs } => {
                 let lhs = *lhs.get_as::<i32>(ram)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
-                *ram.get_mut_as(*dest)? = lhs.wrapping_mul(rhs);
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
+                *dest = lhs.wrapping_mul(rhs);
             }
             Self::Div { dest, lhs, rhs } => {
                 let lhs = *lhs.get_as::<i32>(ram)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
                 if rhs != 0 {
-                    *ram.get_mut_as(*dest)? = lhs.wrapping_div(rhs);
+                    *dest = lhs.wrapping_div(rhs);
                 } else {
                     return Err(RuntimeError::DivByZero);
                 }
@@ -146,41 +158,48 @@ impl Instruction {
             Self::Rem { dest, lhs, rhs } => {
                 let lhs = *lhs.get_as::<i32>(ram)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
                 if rhs != 0 {
-                    *ram.get_mut_as(*dest)? = lhs.wrapping_rem(rhs);
+                    *dest = lhs.wrapping_rem(rhs);
                 } else {
                     return Err(RuntimeError::DivByZero);
                 }
             }
             Self::AddAssign { dest, rhs } => {
-                let lhs = *ram.get_as::<i32>(*dest)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
-                *ram.get_mut_as(*dest)? = lhs.wrapping_add(rhs);
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
+                *dest = dest.wrapping_add(rhs);
             }
             Self::SubAssign { dest, rhs } => {
-                let lhs = *ram.get_as::<i32>(*dest)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
-                *ram.get_mut_as(*dest)? = lhs.wrapping_sub(rhs);
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
+                *dest = dest.wrapping_sub(rhs);
             }
             Self::MulAssign { dest, rhs } => {
-                let lhs = *ram.get_as::<i32>(*dest)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
-                *ram.get_mut_as(*dest)? = lhs.wrapping_mul(rhs);
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
+                *dest = dest.wrapping_mul(rhs);
             }
             Self::DivAssign { dest, rhs } => {
-                let lhs = *ram.get_as::<i32>(*dest)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
                 if rhs != 0 {
-                    *ram.get_mut_as(*dest)? = lhs.wrapping_div(rhs);
+                    *dest = dest.wrapping_div(rhs);
                 } else {
                     return Err(RuntimeError::DivByZero);
                 }
             }
             Self::RemAssign { dest, rhs } => {
-                let lhs = *ram.get_as::<i32>(*dest)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
+                let dest = dest.get_mut_as::<i32>(ram)?;
+
                 if rhs != 0 {
-                    *ram.get_mut_as(*dest)? = lhs.wrapping_rem(rhs);
+                    *dest = dest.wrapping_rem(rhs);
                 } else {
                     return Err(RuntimeError::DivByZero);
                 }
@@ -188,40 +207,48 @@ impl Instruction {
             Self::GetPixel { dest, x, y } => {
                 let x = *x.get_as::<i32>(ram)?;
                 let y = *y.get_as::<i32>(ram)?;
-                let color = unsafe { screen.get_pixel(x, y) }
+                let dest = dest.get_mut_as::<ColorRGB>(ram)?;
+
+                *dest = unsafe { screen.get_pixel(x, y) }
                     .map_err(RuntimeError::ScreenError)?
                     .to_rgb();
-                *ram.get_mut_as(*dest)? = color;
             }
-            Self::Print { T, what } => {
+            Self::Print { what } => {
+                /// recursive printing
                 fn print(ty: &Type, what: &Source, ram: &Memory) -> Result<(), RuntimeError> {
                     match ty {
-                        Type::Bool => println!("{}", what.get_as::<bool>(ram)?),
-                        Type::Int => println!("{}", what.get_as::<i32>(ram)?),
-                        Type::Label => println!("0x{:08x}", what.get_as::<UAddr>(ram)?),
-                        Type::Str => println!("{}", what.get_as_str(ram)?),
-                        Type::Color => println!("{:?}", what.get_as::<ColorRGB>(ram)?),
-                        Type::Key => println!("{:?}", what.get_as::<Key>(ram)?),
-                        Type::Button => println!("{:?}", what.get_as::<Button>(ram)?),
-                        Type::Action => println!("{:?}", what.get_as::<Direction>(ram)?),
-                        Type::Coordinate => println!("{:?}", what.get_as::<Coordinate>(ram)?),
+                        Type::Bool => print!("{}", what.get_as::<bool>(ram)?),
+                        Type::Int => print!("{}", what.get_as::<i32>(ram)?),
+                        Type::Str => print!("{}", what.get_as_str(ram)?),
+                        Type::Color => print!("{:?}", what.get_as::<ColorRGB>(ram)?),
+                        Type::Key => print!("{:?}", what.get_as::<Key>(ram)?),
+                        Type::Button => print!("{:?}", what.get_as::<Button>(ram)?),
+                        Type::Action => print!("{:?}", what.get_as::<Direction>(ram)?),
+                        Type::Coordinate => print!("{:?}", what.get_as::<Coordinate>(ram)?),
                         Type::Union(tys) => {
                             let (ty, bytes) = Type::union_variant(tys, what.get(ram)?)?;
                             print(ty, &Source::Immediate(Box::from(bytes)), ram)?;
                         }
+                        Type::Pointer(_) => print!("{}", what.get_as::<AddressRange>(ram)?),
                     }
                     Ok(())
                 }
-                print(T, what, ram)?;
+
+                for (ty, msg) in what {
+                    print(ty, msg, ram)?;
+                }
+                println!();
             }
             Self::Wait { ms } => {
                 let ms = (*ms.get_as::<i32>(ram)?).max(0);
+
                 std::thread::sleep(std::time::Duration::from_millis(ms.try_into().unwrap()));
             }
             Self::MoveMouse { coord, x, y } => {
                 let coord = *coord.get_as::<Coordinate>(ram)?;
                 let x = *x.get_as::<i32>(ram)?;
                 let y = *y.get_as::<i32>(ram)?;
+
                 input.move_mouse(x, y, coord)?;
             }
             Self::Key { action, key } => {

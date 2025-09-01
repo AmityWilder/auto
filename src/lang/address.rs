@@ -1,4 +1,4 @@
-use crate::lang::run::RuntimeError;
+use crate::lang::{memory::Memory, run::RuntimeError};
 
 pub type UAddr = u32;
 
@@ -7,7 +7,7 @@ pub struct Address(pub UAddr);
 
 impl std::fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "0x{:01$x}", self.0, (UAddr::BITS / 4) as usize)
+        write!(f, "0x{:04x}", self.0,)
     }
 }
 
@@ -134,5 +134,25 @@ impl AddressRange {
         debug_assert!(self.end.0 >= self.start.0, "invariant broken");
         // SAFETY: Guaranteed by type invariant
         unsafe { self.end.0.unchecked_sub(self.start.0) }
+    }
+
+    pub fn get<'a>(&'a self, ram: &'a Memory) -> Result<&'a [u8], RuntimeError> {
+        ram.get(*self)
+    }
+
+    pub fn get_as<'a, T>(&'a self, ram: &'a Memory) -> Result<&'a T, RuntimeError> {
+        ram.get_as(*self)
+    }
+
+    pub fn get_as_str<'a>(&'a self, ram: &'a Memory) -> Result<&'a str, RuntimeError> {
+        ram.get_as_str(*self)
+    }
+
+    pub fn get_mut<'a>(&'a self, ram: &'a mut Memory) -> Result<&'a mut [u8], RuntimeError> {
+        ram.get_mut(*self)
+    }
+
+    pub fn get_mut_as<'a, T>(&'a self, ram: &'a mut Memory) -> Result<&'a mut T, RuntimeError> {
+        ram.get_mut_as(*self)
     }
 }

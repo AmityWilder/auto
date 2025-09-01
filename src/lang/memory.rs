@@ -12,7 +12,19 @@ pub enum Source {
 impl std::fmt::Display for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Immediate(value) => write!(f, "${value:?}"),
+            Self::Immediate(value) => {
+                write!(f, "[")?;
+                let mut has_prefix = false;
+                for byte in value {
+                    if has_prefix {
+                        write!(f, " ")?;
+                    } else {
+                        has_prefix = true;
+                    }
+                    write!(f, "{:02x}", byte)?;
+                }
+                write!(f, "]")
+            }
             Self::Address(addr) => write!(f, "{addr}"),
         }
     }

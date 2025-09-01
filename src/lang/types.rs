@@ -2,7 +2,11 @@ use enigo::{Button, Coordinate, Direction, Key};
 
 use crate::{
     input::{KeyboardKey, MouseButton},
-    lang::{address::UAddr, run::RuntimeError},
+    lang::{
+        address::{AddressRange, UAddr},
+        parse::VarTable,
+        run::RuntimeError,
+    },
     screen::ColorRGB,
 };
 
@@ -10,7 +14,6 @@ use crate::{
 pub enum Type {
     Bool,
     Int,
-    Label,
     Str,
     Color,
     Key,
@@ -18,6 +21,34 @@ pub enum Type {
     Action,
     Coordinate,
     Union(Box<[Type]>),
+    Pointer(Option<Box<Type>>),
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Bool => write!(f, "Bool"),
+            Type::Int => write!(f, "Int"),
+            Type::Str => write!(f, "Str"),
+            Type::Color => write!(f, "Color"),
+            Type::Key => write!(f, "Key"),
+            Type::Button => write!(f, "Button"),
+            Type::Action => write!(f, "Action"),
+            Type::Coordinate => write!(f, "Coordinate"),
+            Type::Union(tys) => {
+                write!(
+                    f,
+                    "({})",
+                    tys.iter()
+                        .map(|ty| format!("{ty}"))
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                )
+            }
+            Type::Pointer(None) => write!(f, "Void*"),
+            Type::Pointer(Some(ty)) => write!(f, "{ty}*"),
+        }
+    }
 }
 
 impl Type {
@@ -56,7 +87,6 @@ impl Type {
         match self {
             Self::Bool => Ok(size_of::<bool>() as UAddr),
             Self::Int => Ok(size_of::<i32>() as UAddr),
-            Self::Label => Ok(size_of::<UAddr>() as UAddr),
             Self::Str => Ok(size_of::<String>() as UAddr),
             Self::Color => Ok(size_of::<ColorRGB>() as UAddr),
             Self::Key => Ok(size_of::<Key>() as UAddr),
@@ -69,10 +99,11 @@ impl Type {
                         .try_fold(0, |max, ty| ty.size().map(|size| max.max(size)))?,
                 )
                 .ok_or_else(|| RuntimeError::TypeSizeOverflow(self.clone())),
+            Self::Pointer(_) => Ok(size_of::<AddressRange>() as UAddr),
         }
     }
 
-    pub fn try_parse_imm(&self, s: &str) -> Option<Box<[u8]>> {
+    pub(super) fn try_parse_imm(&self, s: &str, stack: &VarTable) -> Option<Box<[u8]>> {
         match self {
             Self::Bool => match s {
                 "True" => Some(true),
@@ -82,12 +113,14 @@ impl Type {
             .map(|x| [x as u8])
             .map(Box::from),
             Self::Int => s.parse::<i32>().ok().map(i32::to_ne_bytes).map(Box::from),
-            Self::Label => s
-                .parse::<UAddr>()
-                .ok()
-                .map(UAddr::to_ne_bytes)
-                .map(Box::from),
-            Self::Str => Some(Box::from(s.as_bytes())),
+            Self::Str => {
+                let s = s
+                    .strip_prefix('"')?
+                    .strip_suffix('"')?
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\");
+                Some(Box::from(s.as_bytes()))
+            }
             Self::Color => s
                 .parse::<ColorRGB>()
                 .ok()
@@ -118,16 +151,35 @@ impl Type {
             }
             .map(|x| [x as u8])
             .map(Box::from),
-            Self::Union(tys) => tys.iter().find_map(|ty| ty.try_parse_imm(s)),
+            Self::Union(tys) => tys.iter().find_map(|ty| ty.try_parse_imm(s, stack)),
+            Self::Pointer(ty) => {
+                if let Some(s) = s.strip_prefix('&') {
+                    stack
+                        .get(s)
+                        .and_then(|(var_ty, loc)| (ty.as_deref().is_none_or(|ty| var_ty == ty)).then_some(loc))
+                        .map(|loc| Box::from(unsafe {
+                            std::mem::transmute::<AddressRange, [u8; size_of::<AddressRange>()]>(*loc)
+                        }))
+                } else if s == "Null" {
+                    Some(Box::from([0; size_of::<AddressRange>()]))
+                } else {
+                    None
+                }
+            }
         }
     }
 
-    pub fn try_deduce_imm(s: &str) -> Option<Self> {
+    pub(super) fn try_deduce_imm(s: &str, stack: &VarTable) -> Option<Self> {
         match s {
             "True" | "False" => Some(Self::Bool),
             "Abs" | "Rel" => Some(Self::Coordinate),
+            "Null" => Some(Self::Pointer(None)),
             _ => {
-                if s.parse::<i32>().is_ok() {
+                if let Some(s) = s.strip_prefix('&') {
+                    stack
+                        .get(s)
+                        .map(|(ty, _)| Type::Pointer(Some(Box::new(ty.clone()))))
+                } else if s.parse::<i32>().is_ok() {
                     Some(Self::Int)
                 } else if s.starts_with('#') {
                     Some(Self::Color)
