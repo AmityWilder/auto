@@ -26,6 +26,7 @@ pub enum RuntimeError {
     InputError(InputError),
     ScreenError(ScreenError),
     Utf8Error(std::str::Utf8Error),
+    Unknown,
 }
 
 impl From<InputError> for RuntimeError {
@@ -83,6 +84,7 @@ impl std::fmt::Display for RuntimeError {
             Self::InputError(_) => write!(f, "input error"),
             Self::ScreenError(_) => write!(f, "screen error"),
             Self::Utf8Error(_) => write!(f, "utf8 error"),
+            Self::Unknown => write!(f, "unknown error"),
         }
     }
 }
@@ -107,102 +109,70 @@ impl Instruction {
         counter: &mut UAddr,
     ) -> Result<(), RuntimeError> {
         match self {
-            Self::Set { T, dest, src } => {
-                let type_size = T.size()?;
-                debug_assert_eq!(dest.size(), type_size);
-                assert_eq!(dest.size(), src.size(), "dest = {dest}, src = {src}");
-                match src {
-                    Source::Immediate(val) => dest.get_mut(ram)?.copy_from_slice(val),
-                    Source::Address(src) => ram.copy(*dest, *src)?,
-                }
+            Self::Set { T: _, dest, src } => {
+                let src = src.get(ram)?.to_vec();
+                let dest = dest.get_mut(ram)?;
+
+                dest.copy_from_slice(&src);
             }
             Self::Deref { T: _, dest, src } => {
-                let src = *src.get_as::<AddressRange>(ram)?;
-                let dest = *dest;
+                let src = src.get_as::<AddressRange>(ram)?.get(ram)?.to_vec();
+                let dest = dest.get_mut(ram)?;
 
-                assert!(dest.size() <= src.size(), "dest = {dest}, src = {src}");
-                ram.copy(dest, src.split_at(dest.size()).expect("already checked").0)?;
+                dest.copy_from_slice(&src);
             }
-            Self::Add { dest, lhs, rhs } => {
+            Self::AddInts { dest, lhs, rhs } => {
                 let lhs = *lhs.get_as::<i32>(ram)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
                 let dest = dest.get_mut_as::<i32>(ram)?;
 
                 *dest = lhs.wrapping_add(rhs);
             }
-            Self::Sub { dest, lhs, rhs } => {
-                let lhs = *lhs.get_as::<i32>(ram)?;
-                let rhs = *rhs.get_as::<i32>(ram)?;
-                let dest = dest.get_mut_as::<i32>(ram)?;
+            Self::AddColors { dest, lhs, rhs } => {
+                let lhs = *lhs.get_as::<ColorRGB>(ram)?;
+                let rhs = *rhs.get_as::<ColorRGB>(ram)?;
+                let dest = dest.get_mut_as::<ColorRGB>(ram)?;
 
-                *dest = lhs.wrapping_sub(rhs);
+                dest.r = lhs.r.wrapping_add(rhs.r);
+                dest.g = lhs.g.wrapping_add(rhs.g);
+                dest.b = lhs.b.wrapping_add(rhs.b);
             }
-            Self::Mul { dest, lhs, rhs } => {
-                let lhs = *lhs.get_as::<i32>(ram)?;
+            Self::AddPtrInt { T, dest, lhs, rhs } => {
+                let lhs = *lhs.get_as::<AddressRange>(ram)?;
                 let rhs = *rhs.get_as::<i32>(ram)?;
-                let dest = dest.get_mut_as::<i32>(ram)?;
+                let dest = dest.get_mut_as::<AddressRange>(ram)?;
+                let step = T.size()?;
 
-                *dest = lhs.wrapping_mul(rhs);
+                *dest = AddressRange::new(
+                    Address(lhs.start().0.wrapping_add_signed(rhs * step as i32)),
+                    Address(lhs.end().0.wrapping_add_signed(rhs * step as i32)),
+                )
+                .ok_or(RuntimeError::Unknown)?;
             }
-            Self::Div { dest, lhs, rhs } => {
-                let lhs = *lhs.get_as::<i32>(ram)?;
-                let rhs = *rhs.get_as::<i32>(ram)?;
-                let dest = dest.get_mut_as::<i32>(ram)?;
-
-                if rhs != 0 {
-                    *dest = lhs.wrapping_div(rhs);
-                } else {
-                    return Err(RuntimeError::DivByZero);
-                }
-            }
-            Self::Rem { dest, lhs, rhs } => {
-                let lhs = *lhs.get_as::<i32>(ram)?;
-                let rhs = *rhs.get_as::<i32>(ram)?;
-                let dest = dest.get_mut_as::<i32>(ram)?;
-
-                if rhs != 0 {
-                    *dest = lhs.wrapping_rem(rhs);
-                } else {
-                    return Err(RuntimeError::DivByZero);
-                }
-            }
-            Self::AddAssign { dest, rhs } => {
+            Self::AddAssignInts { dest, rhs } => {
                 let rhs = *rhs.get_as::<i32>(ram)?;
                 let dest = dest.get_mut_as::<i32>(ram)?;
 
                 *dest = dest.wrapping_add(rhs);
             }
-            Self::SubAssign { dest, rhs } => {
-                let rhs = *rhs.get_as::<i32>(ram)?;
-                let dest = dest.get_mut_as::<i32>(ram)?;
+            Self::AddAssignColors { dest, rhs } => {
+                let rhs = *rhs.get_as::<ColorRGB>(ram)?;
+                let dest = dest.get_mut_as::<ColorRGB>(ram)?;
 
-                *dest = dest.wrapping_sub(rhs);
+                dest.r = dest.r.wrapping_add(rhs.r);
+                dest.g = dest.g.wrapping_add(rhs.g);
+                dest.b = dest.b.wrapping_add(rhs.b);
             }
-            Self::MulAssign { dest, rhs } => {
+            Self::AddAssignPtrInt { T, dest, rhs } => {
                 let rhs = *rhs.get_as::<i32>(ram)?;
-                let dest = dest.get_mut_as::<i32>(ram)?;
+                let dest = dest.get_mut_as::<AddressRange>(ram)?;
+                let step = T.size()?;
 
-                *dest = dest.wrapping_mul(rhs);
-            }
-            Self::DivAssign { dest, rhs } => {
-                let rhs = *rhs.get_as::<i32>(ram)?;
-                let dest = dest.get_mut_as::<i32>(ram)?;
-
-                if rhs != 0 {
-                    *dest = dest.wrapping_div(rhs);
-                } else {
-                    return Err(RuntimeError::DivByZero);
-                }
-            }
-            Self::RemAssign { dest, rhs } => {
-                let rhs = *rhs.get_as::<i32>(ram)?;
-                let dest = dest.get_mut_as::<i32>(ram)?;
-
-                if rhs != 0 {
-                    *dest = dest.wrapping_rem(rhs);
-                } else {
-                    return Err(RuntimeError::DivByZero);
-                }
+                *dest = AddressRange::new(
+                    Address(dest.start().0.wrapping_add_signed(rhs * step as i32)),
+                    Address(dest.end().0.wrapping_add_signed(rhs * step as i32)),
+                )
+                .ok_or(RuntimeError::Unknown)?;
             }
             Self::GetPixel { dest, x, y } => {
                 let x = *x.get_as::<i32>(ram)?;

@@ -123,10 +123,4 @@ impl Memory {
         self.get_mut(range)
             .map(|data| unsafe { &mut *(std::ptr::from_mut::<[u8]>(data).cast::<T>()) })
     }
-
-    #[inline]
-    pub fn copy(&mut self, dest: AddressRange, src: AddressRange) -> Result<(), RuntimeError> {
-        self.data.copy_within(src.memory(), dest.memory().start);
-        Ok(())
-    }
 }

@@ -126,6 +126,7 @@ impl AddressRange {
 
     #[inline]
     pub fn memory(self) -> std::ops::Range<usize> {
+        debug_assert!(self.end.0 >= self.start.0, "invariant broken");
         usize::from(self.start)..usize::from(self.end)
     }
 

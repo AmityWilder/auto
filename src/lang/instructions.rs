@@ -49,48 +49,32 @@ pub enum Instruction {
         dest: AddressRange,
         src: Source,
     },
-    Add {
+    AddInts {
         dest: AddressRange,
         lhs: Source,
         rhs: Source,
     },
-    Sub {
+    AddColors {
         dest: AddressRange,
         lhs: Source,
         rhs: Source,
     },
-    Mul {
+    AddPtrInt {
+        T: Type,
         dest: AddressRange,
         lhs: Source,
         rhs: Source,
     },
-    Div {
-        dest: AddressRange,
-        lhs: Source,
-        rhs: Source,
-    },
-    Rem {
-        dest: AddressRange,
-        lhs: Source,
-        rhs: Source,
-    },
-    AddAssign {
+    AddAssignInts {
         dest: AddressRange,
         rhs: Source,
     },
-    SubAssign {
+    AddAssignColors {
         dest: AddressRange,
         rhs: Source,
     },
-    MulAssign {
-        dest: AddressRange,
-        rhs: Source,
-    },
-    DivAssign {
-        dest: AddressRange,
-        rhs: Source,
-    },
-    RemAssign {
+    AddAssignPtrInt {
+        T: Type,
         dest: AddressRange,
         rhs: Source,
     },
@@ -120,6 +104,22 @@ pub enum Instruction {
     },
 }
 
+macro_rules! tf {
+    ($($pattern:pat => $out:expr),+ $(,)?) => {
+        Some(Box::new(|ty| match ty { $($pattern => $out,)+ _ => None }) as Box<dyn FnOnce(Type) -> Option<Result<Type, ParseErrorType>>>)
+    };
+}
+
+macro_rules! req {
+    ($pattern:pat) => {
+        |ty| matches!(ty, $pattern)
+    };
+}
+
+fn any_type(_: &Type) -> bool {
+    true
+}
+
 impl Instruction {
     pub(super) fn from_str<'a>(
         stack: &mut VarTable,
@@ -127,101 +127,107 @@ impl Instruction {
         args: &[&'a str],
     ) -> Result<Instruction, ParseErrorType> {
         use ArgDirection::*;
+
         match (ins, args) {
             ("set", &[dest, src]) => {
-                let T = stack
-                    .typecheck(In, src)
-                    .or_else(|| stack.typecheck(Out, dest))
-                    .ok_or(ParseErrorType::TypeDeductionFailed("T"))
-                    .flatten()?;
+                let T = stack.deduce("T", [(Out, dest, None), (In, src, None)], any_type)?;
                 let dest = stack.lookup_out(Out, dest, &T)?;
                 let src = stack.lookup(In, src, &T)?;
                 Ok(Self::Set { T, dest, src })
             }
+            ("set", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "set",
+                expect: &[2],
+                actual: args.len(),
+            }),
             ("*", &[dest, src]) => {
-                let T = match stack.typecheck(In, src) {
-                    Some(Ok(Type::Pointer(Some(ty)))) => Some(Ok(*ty)),
-                    Some(Ok(Type::Pointer(None) | _)) => None,
-                    x @ (Some(Err(_)) | None) => x,
-                }
-                .or_else(|| stack.typecheck(Out, dest))
-                .ok_or(ParseErrorType::TypeDeductionFailed("T"))
-                .flatten()?;
+                let T = stack.deduce(
+                    "T",
+                    [
+                        (Out, dest, None),
+                        (In, src, tf!(Type::Pointer(Some(ty)) => Some(Ok(*ty)))),
+                    ],
+                    any_type,
+                )?;
                 let dest = stack.lookup_out(Out, dest, &T)?;
                 let src = stack
                     .lookup(In, src, &Type::Pointer(Some(Box::new(T.clone()))))
                     .or_else(|_| stack.lookup(In, src, &Type::Pointer(None)))?;
                 Ok(Self::Deref { T, dest, src })
             }
+            ("*", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "*",
+                expect: &[2],
+                actual: args.len(),
+            }),
             ("add", &[dest, lhs, rhs]) => {
-                let dest = stack.lookup_out(Out, dest, &Type::Int)?;
-                let lhs = stack.lookup(In, lhs, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::Add { dest, lhs, rhs })
-            }
-            ("sub", &[dest, lhs, rhs]) => {
-                let dest = stack.lookup_out(Out, dest, &Type::Int)?;
-                let lhs = stack.lookup(In, lhs, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::Sub { dest, lhs, rhs })
-            }
-            ("mul", &[dest, lhs, rhs]) => {
-                let dest = stack.lookup_out(Out, dest, &Type::Int)?;
-                let lhs = stack.lookup(In, lhs, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::Mul { dest, lhs, rhs })
-            }
-            ("div", &[dest, lhs, rhs]) => {
-                let dest = stack.lookup_out(Out, dest, &Type::Int)?;
-                let lhs = stack.lookup(In, lhs, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::Div { dest, lhs, rhs })
-            }
-            ("rem", &[dest, lhs, rhs]) => {
-                let dest = stack.lookup_out(Out, dest, &Type::Int)?;
-                let lhs = stack.lookup(In, lhs, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::Rem { dest, lhs, rhs })
+                let T = stack.deduce(
+                    "T",
+                    [(In, lhs, None), (Out, dest, None), (In, rhs, None)],
+                    req!(Type::Int | Type::Color | Type::Pointer(Some(_))),
+                )?;
+                let U = stack.deduce("U", [(In, rhs, None)], |ty| {
+                    matches!(
+                        (&T, ty),
+                        (Type::Int, Type::Int)
+                            | (Type::Color, Type::Color | Type::Int)
+                            | (Type::Pointer(Some(_)), Type::Int)
+                    )
+                })?;
+                let dest = stack.lookup_out(Out, dest, &T)?;
+                let lhs = stack.lookup(In, lhs, &T)?;
+                let rhs = stack.lookup(In, rhs, &U)?;
+                Ok(match (&T, &U) {
+                    (Type::Int, Type::Int) => Self::AddInts { dest, lhs, rhs },
+                    (Type::Color, Type::Color) => Self::AddColors { dest, lhs, rhs },
+                    (Type::Pointer(Some(_)), Type::Int) => Self::AddPtrInt { T, dest, lhs, rhs },
+                    _ => unreachable!(),
+                })
             }
             ("add", &[dest, rhs]) => {
-                let dest = stack.lookup_out(InOut, dest, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::AddAssign { dest, rhs })
+                let T = stack.deduce(
+                    "T",
+                    [(InOut, dest, None)],
+                    req!(Type::Int | Type::Color | Type::Pointer(Some(_))),
+                )?;
+                let U = stack.deduce("U", [(In, rhs, None)], |ty| {
+                    matches!(
+                        (&T, ty),
+                        (Type::Int, Type::Int)
+                            | (Type::Color, Type::Color | Type::Int)
+                            | (Type::Pointer(Some(_)), Type::Int)
+                    )
+                })?;
+                let dest = stack.lookup_out(InOut, dest, &T)?;
+                let rhs = stack.lookup(In, rhs, &U)?;
+                Ok(match (&T, &U) {
+                    (Type::Int, Type::Int) => Self::AddAssignInts { dest, rhs },
+                    (Type::Color, Type::Color) => Self::AddAssignColors { dest, rhs },
+                    (Type::Pointer(Some(_)), Type::Int) => Self::AddAssignPtrInt { T, dest, rhs },
+                    _ => unreachable!(),
+                })
             }
-            ("sub", &[dest, rhs]) => {
-                let dest = stack.lookup_out(InOut, dest, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::SubAssign { dest, rhs })
-            }
-            ("mul", &[dest, rhs]) => {
-                let dest = stack.lookup_out(InOut, dest, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::MulAssign { dest, rhs })
-            }
-            ("div", &[dest, rhs]) => {
-                let dest = stack.lookup_out(InOut, dest, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::DivAssign { dest, rhs })
-            }
-            ("rem", &[dest, rhs]) => {
-                let dest = stack.lookup_out(InOut, dest, &Type::Int)?;
-                let rhs = stack.lookup(In, rhs, &Type::Int)?;
-                Ok(Self::RemAssign { dest, rhs })
-            }
+            ("add", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "add",
+                expect: &[1, 2],
+                actual: args.len(),
+            }),
             ("getpx", &[dest, x, y]) => {
                 let dest = stack.lookup_out(Out, dest, &Type::Color)?;
                 let x = stack.lookup(In, x, &Type::Int)?;
                 let y = stack.lookup(In, y, &Type::Int)?;
                 Ok(Self::GetPixel { dest, x, y })
             }
+            ("getpx", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "getpx",
+                expect: &[3],
+                actual: args.len(),
+            }),
             ("print", what) => {
                 let what = what
                     .iter()
-                    .map(|what| {
-                        let T = stack
-                            .typecheck(In, what)
-                            .ok_or(ParseErrorType::TypeDeductionFailed("T"))
-                            .flatten()?;
+                    .map(|&what| {
+                        let T = stack.deduce("T", [(In, what, None)], any_type)?;
                         let msg = stack.lookup(In, what, &T)?;
                         Ok((T, msg))
                     })
@@ -232,22 +238,42 @@ impl Instruction {
                 let ms = stack.lookup(In, ms, &Type::Int)?;
                 Ok(Self::Wait { ms })
             }
+            ("wait", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "wait",
+                expect: &[1],
+                actual: args.len(),
+            }),
             ("mouse", &[coord, x, y]) => {
                 let coord = stack.lookup(In, coord, &Type::Coordinate)?;
                 let x = stack.lookup(In, x, &Type::Int)?;
                 let y = stack.lookup(In, y, &Type::Int)?;
                 Ok(Self::MoveMouse { coord, x, y })
             }
+            ("mouse", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "mouse",
+                expect: &[3],
+                actual: args.len(),
+            }),
             ("kb", &[action, key]) => {
                 let action = stack.lookup(In, action, &Type::Action)?;
                 let key = stack.lookup(In, key, &Type::Key)?;
                 Ok(Self::Key { action, key })
             }
+            ("kb", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "kb",
+                expect: &[2],
+                actual: args.len(),
+            }),
             ("mb", &[action, button]) => {
                 let action = stack.lookup(In, action, &Type::Action)?;
                 let button = stack.lookup(In, button, &Type::Button)?;
                 Ok(Self::Button { action, button })
             }
+            ("mb", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "mb",
+                expect: &[2],
+                actual: args.len(),
+            }),
             _ => Err(ParseErrorType::UnknownInstruction(ins.to_string())),
         }
     }
@@ -261,16 +287,24 @@ impl std::fmt::Display for Instruction {
             Self::Deref { T, dest, src } => {
                 write!(f, "Deref<T = {T}>(dest: {dest}, src: {src})")
             }
-            Self::Add { dest, lhs, rhs } => write!(f, "Add(dest: {dest}, lhs: {lhs}, rhs: {rhs})"),
-            Self::Sub { dest, lhs, rhs } => write!(f, "Sub(dest: {dest}, lhs: {lhs}, rhs: {rhs})"),
-            Self::Mul { dest, lhs, rhs } => write!(f, "Mul(dest: {dest}, lhs: {lhs}, rhs: {rhs})"),
-            Self::Div { dest, lhs, rhs } => write!(f, "Div(dest: {dest}, lhs: {lhs}, rhs: {rhs})"),
-            Self::Rem { dest, lhs, rhs } => write!(f, "Rem(dest: {dest}, lhs: {lhs}, rhs: {rhs})"),
-            Self::AddAssign { dest, rhs } => write!(f, "AddAssign(dest: {dest}, rhs: {rhs})"),
-            Self::SubAssign { dest, rhs } => write!(f, "SubAssign(dest: {dest}, rhs: {rhs})"),
-            Self::MulAssign { dest, rhs } => write!(f, "MulAssign(dest: {dest}, rhs: {rhs})"),
-            Self::DivAssign { dest, rhs } => write!(f, "DivAssign(dest: {dest}, rhs: {rhs})"),
-            Self::RemAssign { dest, rhs } => write!(f, "RemAssign(dest: {dest}, rhs: {rhs})"),
+            Self::AddInts { dest, lhs, rhs } => {
+                write!(f, "AddInts(dest: {dest}, lhs: {lhs}, rhs: {rhs})")
+            }
+            Self::AddColors { dest, lhs, rhs } => {
+                write!(f, "AddColors(dest: {dest}, lhs: {lhs}, rhs: {rhs})")
+            }
+            Self::AddPtrInt { T, dest, lhs, rhs } => {
+                write!(f, "AddPtrInt<T: {T}>(dest: {dest}, lhs: {lhs}, rhs: {rhs})")
+            }
+            Self::AddAssignInts { dest, rhs } => {
+                write!(f, "AddAssignInts(dest: {dest}, rhs: {rhs})")
+            }
+            Self::AddAssignColors { dest, rhs } => {
+                write!(f, "AddAssignColors(dest: {dest}, rhs: {rhs})")
+            }
+            Self::AddAssignPtrInt { T, dest, rhs } => {
+                write!(f, "AddAssignPtrInt<T: {T}>(dest: {dest}, rhs: {rhs})")
+            }
             Self::GetPixel { dest, x, y } => write!(f, "GetPixel(dest: {dest}, x: {x}, y: {y})"),
             Self::Print { what } => {
                 let Ts = what

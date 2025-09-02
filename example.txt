@@ -7,6 +7,14 @@ set aPtr &a
 print "pointer: " aPtr
 * aVal aPtr
 print "value: " aVal
+add aPtr -1
+print "pointer: " aPtr
+* aVal aPtr
+print "value: " aVal
+add aPtr -1
+print "pointer: " aPtr
+* aVal aPtr
+print "value: " aVal
 
 print "Hello \\\"world\"!"
 

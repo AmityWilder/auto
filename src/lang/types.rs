@@ -45,8 +45,8 @@ impl std::fmt::Display for Type {
                         .join(" | "),
                 )
             }
-            Type::Pointer(None) => write!(f, "Void*"),
-            Type::Pointer(Some(ty)) => write!(f, "{ty}*"),
+            Type::Pointer(None) => write!(f, "*Void"),
+            Type::Pointer(Some(ty)) => write!(f, "*{ty}"),
         }
     }
 }

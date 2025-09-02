@@ -25,15 +25,11 @@ pub enum ParseErrorType {
     InvalidLiteral(Type, String),
     UnknownImmType(String),
     TypeDeductionFailed(&'static str),
-    // TooManyArgs {
-    //     instruction: &'static str,
-    //     expect: usize,
-    //     actual: usize,
-    // },
-    // MissingArgs {
-    //     instruction: &'static str,
-    //     missing: &'static str,
-    // },
+    ArgCountMismatch {
+        instruction: &'static str,
+        expect: &'static [usize],
+        actual: usize,
+    },
     TypeMismatch {
         arg: String,
         expect: Type,
@@ -70,21 +66,23 @@ impl std::fmt::Display for ParseError {
             TypeDeductionFailed(id) => {
                 write!(f, "could not deduce the type of generic argument `{id}`")
             }
-            // TooManyArgs {
-            //     instruction: ins,
-            //     expect,
-            //     actual,
-            // } => write!(
-            //     f,
-            //     "`{ins}` takes {expect} arguments but {actual} were supplied"
-            // ),
-            // MissingArgs {
-            //     instruction: ins,
-            //     missing,
-            // } => write!(
-            //     f,
-            //     "not enough arguments for `{ins}`. missing argument for `{missing}`"
-            // ),
+            ArgCountMismatch {
+                instruction: ins,
+                expect,
+                actual,
+            } => write!(
+                f,
+                "`{ins}` takes {} arguments but {actual} were supplied",
+                match expect {
+                    [] => unimplemented!(),
+                    [n] => format!("{n}"),
+                    [n, m] => format!("{n} or {m}"),
+                    [rest @ .., last] => format!(
+                        "{}or {last}",
+                        rest.iter().map(|n| format!("{n}, ")).collect::<String>()
+                    ),
+                }
+            ),
             TypeMismatch {
                 arg,
                 expect,
@@ -134,8 +132,8 @@ impl VarTable {
             .ok_or_else(|| ParseErrorType::UnknownVariable(var.to_string()))
     }
 
-    /// [`None`]: Type is unknown (but not necessarily invalid)
-    /// [`Err`]: Type is invalid
+    /// - [`None`]: type is unknown/dependent but not necessarily invalid
+    /// - [`Err`]: type is invalid
     pub fn typecheck(
         &self,
         direction: ArgDirection,
@@ -154,11 +152,47 @@ impl VarTable {
                     )
                 }
             }
+
             // Type can only be deduced if initialized
-            InOut => self.vars.get(arg).map(|(ty, _)| Ok(ty.clone())),
+            InOut => self.vars.get(arg).map(|(ty, _)| ty).cloned().map(Ok),
+
             // Type cannot be deduced
             Out => None,
         }
+    }
+
+    /// Tries to identify a concrete type that all provided arguments CAN be while
+    /// meeting the constraint, preferring items earlier in the array.
+    ///
+    /// Returns [`None`] if no shared type can be found that meets the constraints.
+    pub fn deduce<'a, I, F>(
+        &self,
+        generic: &'static str,
+        args: I,
+        constraint: F,
+    ) -> Result<Type, ParseErrorType>
+    where
+        I: IntoIterator<
+            Item = (
+                ArgDirection,
+                &'a str,
+                Option<Box<dyn FnOnce(Type) -> Option<Result<Type, ParseErrorType>>>>,
+            ),
+        >,
+        F: FnOnce(&Type) -> bool,
+    {
+        let mut it = args.into_iter().flat_map(|(direction, arg, f)| {
+            match (self.typecheck(direction, arg), f) {
+                (Some(Ok(t)), Some(f)) => f(t),
+                (x, _) => x,
+            }
+        });
+
+        it.next()
+            .and_then(Result::ok)
+            .filter(|t0| it.all(|t| t.is_ok_and(|t| &t == t0)))
+            .filter(constraint)
+            .ok_or(ParseErrorType::TypeDeductionFailed(generic))
     }
 
     pub fn lookup_out(
