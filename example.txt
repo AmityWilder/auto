@@ -1,6 +1,6 @@
 set x 0
 set y 540
-set xmov 5
+set xmov 3
 set ymov 0
 mouse Abs x y
 
@@ -8,10 +8,10 @@ mb Click Left
 
 .squeak:
 mouse Rel xmov ymov
-getpx color x y
-print color
 add x xmov
 add y ymov
+getpx color x y
+print color
 eq isBlack color #000000
 if isBlack
 goto .squeak
