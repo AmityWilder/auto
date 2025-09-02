@@ -2,9 +2,9 @@ use crate::{
     input::{Button, Coordinate, Input, InputError, Key},
     lang::{
         address::{Address, AddressRange, UAddr},
+        compiler::Program,
         instructions::Instruction,
         memory::{Memory, Source},
-        parse::Program,
         types::Type,
     },
     screen::{ColorRGB, Screen, ScreenError},

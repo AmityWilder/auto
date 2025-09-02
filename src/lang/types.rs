@@ -4,7 +4,7 @@ use crate::{
     input::{KeyboardKey, MouseButton},
     lang::{
         address::{Address, AddressRange, UAddr},
-        parse::VarTable,
+        compiler::parse::VarTable,
         run::RuntimeError,
     },
     screen::ColorRGB,

@@ -2,8 +2,8 @@
 
 use crate::lang::{
     address::AddressRange,
+    compiler::parse::{ParseErrorType, VarTable},
     memory::Source,
-    parse::{ParseErrorType, VarTable},
     types::Type,
 };
 

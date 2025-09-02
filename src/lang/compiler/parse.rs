@@ -3,25 +3,17 @@ use std::collections::HashMap;
 
 use crate::lang::{
     address::{Address, AddressRange, UAddr},
+    compiler::{Program, lex},
     instructions::{ArgDirection, Instruction},
     memory::Source,
     types::Type,
 };
 
-#[derive(Debug, Clone)]
-pub struct Program(Box<[Instruction]>);
-
-impl Program {
-    #[inline]
-    pub fn line(&self, n: UAddr) -> Option<&Instruction> {
-        self.0.get(n as usize)
-    }
-}
-
 #[derive(Debug)]
 pub enum ParseErrorType {
     UnknownInstruction(String),
     MalformedLabel(String),
+    UnclosedString(String),
     UnknownVariable(String),
     InvalidLiteral(Type, String),
     UnknownImmType(String),
@@ -55,6 +47,7 @@ impl std::fmt::Display for ParseError {
         match &self.ty {
             UnknownInstruction(name) => write!(f, "unknown instruction: `{name}`"),
             MalformedLabel(label) => write!(f, "label `{label}` is missing a colon"),
+            UnclosedString(s) => write!(f, "string argument is mising a closing '\"': {s}"),
             UnknownVariable(name) => write!(f, "unknown variable: `{name}`"),
             InvalidLiteral(ty, value) => {
                 write!(f, "could not parse {value:?} as a {ty:?} literal")
@@ -108,7 +101,7 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-pub(super) struct VarTable {
+pub struct VarTable {
     vars: HashMap<String, (Type, AddressRange)>,
     available: AddressRange,
 }
@@ -263,71 +256,6 @@ impl VarTable {
     }
 }
 
-impl Program {
-    fn lex_line<'a>(
-        line_number: usize,
-        s: &'a str,
-        label: &mut Option<&'a str>,
-        ins: &mut Option<&'a str>,
-        args: &mut Vec<&'a str>,
-    ) -> Result<(), ParseErrorType> {
-        let (mut code, comment) = s.split_at(s.find("//").unwrap_or(s.len()));
-        if let Some(after_dot) = code.strip_prefix('.') {
-            (*label, code) = after_dot
-                .split_once(':')
-                .map(|(a, b)| (Some(a), b))
-                .ok_or_else(|| ParseErrorType::MalformedLabel(s.to_string()))?;
-        }
-        let mut it = std::iter::from_fn(|| {
-            let mid;
-            if code.starts_with('"') {
-                let mut is_escaped = false;
-                'find_mid: {
-                    for (i, ch) in code.char_indices().skip(1) {
-                        if !is_escaped {
-                            if ch == '\\' {
-                                is_escaped = true;
-                            } else if ch == '"' {
-                                mid = i + const { '"'.len_utf8() };
-                                break 'find_mid;
-                            }
-                        } else {
-                            is_escaped = false;
-                        }
-                    }
-                    mid = code.len();
-                }
-            } else {
-                mid = code.find(char::is_whitespace).unwrap_or(code.len());
-            }
-            (mid > 0).then(|| {
-                let (start, rest) = code.split_at(mid);
-                code = rest.trim_start();
-                start
-            })
-        });
-        *ins = it.next();
-        args.clear();
-        args.extend(it);
-        if false {
-            print!(
-                "{:>4} |     {}",
-                line_number + 1,
-                ins.unwrap_or_default().yellow(),
-            );
-            for arg in args {
-                if arg.starts_with(|ch: char| ch == '_' || ch.is_ascii_lowercase()) {
-                    print!(" {}", arg.purple());
-                } else {
-                    print!(" {}", arg.blue());
-                }
-            }
-            println!(" {}", comment.green());
-        }
-        Ok(())
-    }
-}
-
 impl std::str::FromStr for Program {
     type Err = ParseError;
 
@@ -341,13 +269,14 @@ impl std::str::FromStr for Program {
             .filter_map(
                 |(n, line)| -> Option<Result<(Option<&str>, Instruction), ParseError>> {
                     let mut ins = None;
-                    if let Err(e) = Self::lex_line(n, line, &mut label, &mut ins, &mut args)
-                        .map_err(|ty| ParseError {
-                            ty,
-                            line: n,
-                            code: line.to_string(),
-                        })
-                    {
+                    if let Err(e) = TokenizedLine::lex_line(
+                        n, line, &mut label, &mut ins, &mut args,
+                    )
+                    .map_err(|ty| ParseError {
+                        ty,
+                        line: n,
+                        code: line.to_string(),
+                    }) {
                         return Some(Err(e));
                     };
                     ins.map(|ins| {

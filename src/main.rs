@@ -1,5 +1,5 @@
 use crate::input::*;
-use crate::lang::{parse::*, run::*};
+use crate::lang::{compiler::Program, run::*};
 use crate::screen::*;
 
 mod input;
