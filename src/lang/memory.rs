@@ -38,6 +38,7 @@ impl Source {
         }
     }
 
+    #[track_caller]
     pub fn get_as<'a, T>(&'a self, ram: &'a Memory) -> Result<&'a T, RuntimeError> {
         match self {
             Self::Immediate(value) => {

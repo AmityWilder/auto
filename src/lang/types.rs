@@ -3,7 +3,7 @@ use enigo::{Button, Coordinate, Direction, Key};
 use crate::{
     input::{KeyboardKey, MouseButton},
     lang::{
-        address::{AddressRange, UAddr},
+        address::{Address, AddressRange, UAddr},
         parse::VarTable,
         run::RuntimeError,
     },
@@ -22,6 +22,7 @@ pub enum Type {
     Coordinate,
     Union(Box<[Type]>),
     Pointer(Option<Box<Type>>),
+    Label,
 }
 
 impl std::fmt::Display for Type {
@@ -47,6 +48,7 @@ impl std::fmt::Display for Type {
             }
             Type::Pointer(None) => write!(f, "*Void"),
             Type::Pointer(Some(ty)) => write!(f, "*{ty}"),
+            Type::Label => write!(f, "Label"),
         }
     }
 }
@@ -100,6 +102,7 @@ impl Type {
                 )
                 .ok_or_else(|| RuntimeError::TypeSizeOverflow(self.clone())),
             Self::Pointer(_) => Ok(size_of::<AddressRange>() as UAddr),
+            Self::Label => Ok(size_of::<Address>() as UAddr),
         }
     }
 
@@ -166,6 +169,7 @@ impl Type {
                     None
                 }
             }
+            Self::Label => s.strip_prefix('.').map(str::as_bytes).map(Box::from),
         }
     }
 
@@ -175,7 +179,9 @@ impl Type {
             "Abs" | "Rel" => Some(Self::Coordinate),
             "Null" => Some(Self::Pointer(None)),
             _ => {
-                if let Some(s) = s.strip_prefix('&') {
+                if s.starts_with('.') {
+                    Some(Self::Label)
+                } else if let Some(s) = s.strip_prefix('&') {
                     stack
                         .get(s)
                         .map(|(ty, _)| Type::Pointer(Some(Box::new(ty.clone()))))

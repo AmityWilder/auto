@@ -115,6 +115,34 @@ impl Instruction {
 
                 dest.copy_from_slice(&src);
             }
+            Self::If { cond } => {
+                let cond = cond.get_as::<bool>(ram)?;
+
+                if !cond {
+                    *counter += 1;
+                }
+            }
+            Self::Goto { label } => {
+                let label = label.get_as::<Address>(ram)?;
+
+                *counter = label.0;
+                return Ok(());
+            }
+            Self::Eq {
+                T: _,
+                dest,
+                lhs,
+                rhs,
+            } => {
+                let lhs = lhs.get(ram)?;
+                let rhs = rhs.get(ram)?;
+
+                let is_eq = lhs == rhs;
+
+                let dest = dest.get_mut_as::<bool>(ram)?;
+
+                *dest = is_eq;
+            }
             Self::Deref { T: _, dest, src } => {
                 let src = src.get_as::<AddressRange>(ram)?.get(ram)?.to_vec();
                 let dest = dest.get_mut(ram)?;
@@ -200,6 +228,7 @@ impl Instruction {
                             print(ty, &Source::Immediate(Box::from(bytes)), ram)?;
                         }
                         Type::Pointer(_) => print!("{}", what.get_as::<AddressRange>(ram)?),
+                        Type::Label => print!("{}", what.get_as::<Address>(ram)?),
                     }
                     Ok(())
                 }

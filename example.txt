@@ -1,78 +1,17 @@
-set x 550     # shared x position
-set delay 200 # time to wait
+set x 0
+set y 540
+set xmov 5
+set ymov 0
+mouse Abs x y
 
-set a 25
-set aPtr &a
+mb Click Left
 
-print "pointer: " aPtr
-* aVal aPtr
-print "value: " aVal
-add aPtr -1
-print "pointer: " aPtr
-* aVal aPtr
-print "value: " aVal
-add aPtr -1
-print "pointer: " aPtr
-* aVal aPtr
-print "value: " aVal
-
-print "Hello \\\"world\"!"
-
-# mouse Abs x 230
-# mb Click Left
-# kb Click Return
-# kb Click Return
-# wait delay
-# kb Click UpArrow
-# wait delay
-# kb Press Shift
-# kb Click H
-# kb Release Shift
-# kb Click E
-# kb Click L
-# kb Click L
-# kb Click O
-# kb Click Space
-# kb Press Shift
-# kb Click W
-# kb Release Shift
-# kb Click O
-# kb Click R
-# kb Click L
-# kb Click D
-# kb Press Shift
-# kb Click Num1
-# kb Release Shift
-# kb Click Space
-# kb Press Shift
-# kb Click ;
-# kb Release Shift
-# kb Click Num3
-# kb Press Shift
-# kb Click Home
-# kb Click '
-# kb Release Shift
-# kb Click Home
-# kb Click C
-# kb Click O
-# kb Click N
-# kb Click S
-# kb Click T
-# kb Click Space
-# kb Press Shift
-# kb Click M
-# kb Click S
-# kb Click G
-# kb Click ;
-# kb Click Space
-# kb Click Num7
-# kb Release Shift
-# kb Click S
-# kb Click T
-# kb Click R
-# kb Click Space
-# kb Click =
-# kb Click Space
-# kb Click End
-# kb Click ;
-# mouse Abs x 165
+.squeak:
+mouse Rel xmov ymov
+getpx color x y
+print color
+add x xmov
+add y ymov
+eq isBlack color #000000
+if isBlack
+goto .squeak

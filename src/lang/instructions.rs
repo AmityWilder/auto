@@ -49,6 +49,18 @@ pub enum Instruction {
         dest: AddressRange,
         src: Source,
     },
+    If {
+        cond: Source,
+    },
+    Goto {
+        label: Source,
+    },
+    Eq {
+        T: Type,
+        dest: AddressRange,
+        lhs: Source,
+        rhs: Source,
+    },
     AddInts {
         dest: AddressRange,
         lhs: Source,
@@ -138,6 +150,36 @@ impl Instruction {
             ("set", _) => Err(ParseErrorType::ArgCountMismatch {
                 instruction: "set",
                 expect: &[2],
+                actual: args.len(),
+            }),
+            ("if", &[cond]) => {
+                let cond = stack.lookup(In, cond, &Type::Bool)?;
+                Ok(Self::If { cond })
+            }
+            ("if", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "if",
+                expect: &[1],
+                actual: args.len(),
+            }),
+            ("goto", &[label]) => {
+                let label = stack.lookup(In, label, &Type::Label)?;
+                Ok(Self::Goto { label })
+            }
+            ("goto", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "goto",
+                expect: &[1],
+                actual: args.len(),
+            }),
+            ("eq", &[dest, lhs, rhs]) => {
+                let T = stack.deduce("T", [(In, lhs, None), (In, rhs, None)], any_type)?;
+                let dest = stack.lookup_out(Out, dest, &Type::Bool)?;
+                let lhs = stack.lookup(In, lhs, &T)?;
+                let rhs = stack.lookup(In, rhs, &T)?;
+                Ok(Self::Eq { T, dest, lhs, rhs })
+            }
+            ("eq", _) => Err(ParseErrorType::ArgCountMismatch {
+                instruction: "eq",
+                expect: &[3],
                 actual: args.len(),
             }),
             ("*", &[dest, src]) => {
@@ -284,6 +326,11 @@ impl std::fmt::Display for Instruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Set { T, dest, src } => write!(f, "Set<T = {T}>(dest: {dest}, src: {src})"),
+            Self::If { cond } => write!(f, "If(cond: {cond})"),
+            Self::Goto { label } => write!(f, "Goto(label: {label})"),
+            Self::Eq { T, dest, lhs, rhs } => {
+                write!(f, "Eq<T = {T}>(dest: {dest}, lhs: {lhs}, rhs: {rhs})")
+            }
             Self::Deref { T, dest, src } => {
                 write!(f, "Deref<T = {T}>(dest: {dest}, src: {src})")
             }

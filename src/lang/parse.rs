@@ -21,6 +21,7 @@ impl Program {
 #[derive(Debug)]
 pub enum ParseErrorType {
     UnknownInstruction(String),
+    MalformedLabel(String),
     UnknownVariable(String),
     InvalidLiteral(Type, String),
     UnknownImmType(String),
@@ -53,6 +54,7 @@ impl std::fmt::Display for ParseError {
         write!(f, "at line {}: ", self.line + 1)?;
         match &self.ty {
             UnknownInstruction(name) => write!(f, "unknown instruction: `{name}`"),
+            MalformedLabel(label) => write!(f, "label `{label}` is missing a colon"),
             UnknownVariable(name) => write!(f, "unknown variable: `{name}`"),
             InvalidLiteral(ty, value) => {
                 write!(f, "could not parse {value:?} as a {ty:?} literal")
@@ -265,10 +267,17 @@ impl Program {
     fn lex_line<'a>(
         line_number: usize,
         s: &'a str,
+        label: &mut Option<&'a str>,
         ins: &mut Option<&'a str>,
         args: &mut Vec<&'a str>,
-    ) {
-        let (mut code, comment) = s.split_at(s.find('#').unwrap_or(s.len()));
+    ) -> Result<(), ParseErrorType> {
+        let (mut code, comment) = s.split_at(s.find("//").unwrap_or(s.len()));
+        if let Some(after_dot) = code.strip_prefix('.') {
+            (*label, code) = after_dot
+                .split_once(':')
+                .map(|(a, b)| (Some(a), b))
+                .ok_or_else(|| ParseErrorType::MalformedLabel(s.to_string()))?;
+        }
         let mut it = std::iter::from_fn(|| {
             let mid;
             if code.starts_with('"') {
@@ -315,6 +324,7 @@ impl Program {
             }
             println!(" {}", comment.green());
         }
+        Ok(())
     }
 }
 
@@ -324,22 +334,112 @@ impl std::str::FromStr for Program {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut stack = VarTable::new(4096);
         let mut args = Vec::new();
-        s.lines()
+        let mut label = None;
+        let exec_lines = s
+            .lines()
             .enumerate()
-            .filter_map(|(n, line)| -> Option<Result<Instruction, ParseError>> {
-                let mut ins = None;
-                Self::lex_line(n, line, &mut ins, &mut args);
-                ins.map(|ins| {
-                    Instruction::from_str(&mut stack, ins, &args)
-                        .inspect(|instruction| println!("parsed: {instruction}"))
+            .filter_map(
+                |(n, line)| -> Option<Result<(Option<&str>, Instruction), ParseError>> {
+                    let mut ins = None;
+                    if let Err(e) = Self::lex_line(n, line, &mut label, &mut ins, &mut args)
                         .map_err(|ty| ParseError {
                             ty,
                             line: n,
                             code: line.to_string(),
                         })
-                })
+                    {
+                        return Some(Err(e));
+                    };
+                    ins.map(|ins| {
+                        Instruction::from_str(&mut stack, ins, &args)
+                            .inspect(|instruction| println!("parsed: {instruction}"))
+                            .map_err(|ty| ParseError {
+                                ty,
+                                line: n,
+                                code: line.to_string(),
+                            })
+                            .map(|x| (label.take(), x))
+                    })
+                },
+            )
+            .collect::<Result<Vec<(Option<&str>, Instruction)>, ParseError>>()?;
+
+        let label_map = exec_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(n, (l, _))| l.map(|l| (l.to_string(), Address(n as UAddr))))
+            .collect::<HashMap<String, Address>>();
+
+        let code = exec_lines
+            .into_iter()
+            .map(|(_, mut c)| {
+                fn label_bytes_to_address(
+                    label_map: &HashMap<String, Address>,
+                    bytes: &[u8],
+                ) -> Box<[u8]> {
+                    Box::from(
+                        label_map
+                            .get(str::from_utf8(bytes).unwrap())
+                            .unwrap()
+                            .0
+                            .to_ne_bytes(),
+                    )
+                }
+                match &mut c {
+                    Instruction::Set {
+                        T: Type::Label,
+                        dest: _,
+                        src: Source::Immediate(label),
+                    }
+                    | Instruction::Deref {
+                        T: Type::Label,
+                        dest: _,
+                        src: Source::Immediate(label),
+                    }
+                    | Instruction::Eq {
+                        T: Type::Label,
+                        dest: _,
+                        lhs: Source::Immediate(label),
+                        rhs: Source::Address(_),
+                    }
+                    | Instruction::Eq {
+                        T: Type::Label,
+                        dest: _,
+                        lhs: Source::Address(_),
+                        rhs: Source::Immediate(label),
+                    }
+                    | Instruction::Goto {
+                        label: Source::Immediate(label),
+                    } => *label = label_bytes_to_address(&label_map, label),
+
+                    Instruction::Eq {
+                        T: Type::Label,
+                        dest: _,
+                        lhs: Source::Immediate(label1),
+                        rhs: Source::Immediate(label2),
+                    } => {
+                        *label1 = label_bytes_to_address(&label_map, label1);
+                        *label2 = label_bytes_to_address(&label_map, label2);
+                    }
+
+                    Instruction::Print { what } => {
+                        for label in what.iter_mut().filter_map(|x| match x {
+                            (Type::Label, Source::Immediate(label)) => Some(label),
+                            _ => None,
+                        }) {
+                            *label = label_bytes_to_address(&label_map, label);
+                        }
+                    }
+                    _ => {}
+                }
+                c
             })
-            .collect::<Result<Vec<Instruction>, ParseError>>()
-            .map(|vec| Program(vec.into_boxed_slice()))
+            .collect();
+
+        // for line in exec_lines {
+        //     if
+        // }
+
+        Ok(Program(code))
     }
 }
