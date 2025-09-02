@@ -3,7 +3,10 @@ use std::collections::HashMap;
 
 use crate::lang::{
     address::{Address, AddressRange, UAddr},
-    compiler::{Program, lex},
+    compiler::{
+        Program,
+        lex::{self, TokenizedLine},
+    },
     instructions::{ArgDirection, Instruction},
     memory::Source,
     types::Type,
@@ -261,37 +264,31 @@ impl std::str::FromStr for Program {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut stack = VarTable::new(4096);
-        let mut args = Vec::new();
-        let mut label = None;
-        let exec_lines = s
+
+        // --- pass 1: tokenize ---
+
+        let document = s
             .lines()
             .enumerate()
-            .filter_map(
-                |(n, line)| -> Option<Result<(Option<&str>, Instruction), ParseError>> {
-                    let mut ins = None;
-                    if let Err(e) = TokenizedLine::lex_line(
-                        n, line, &mut label, &mut ins, &mut args,
-                    )
-                    .map_err(|ty| ParseError {
-                        ty,
-                        line: n,
-                        code: line.to_string(),
-                    }) {
-                        return Some(Err(e));
-                    };
-                    ins.map(|ins| {
-                        Instruction::from_str(&mut stack, ins, &args)
-                            .inspect(|instruction| println!("parsed: {instruction}"))
-                            .map_err(|ty| ParseError {
-                                ty,
-                                line: n,
-                                code: line.to_string(),
-                            })
-                            .map(|x| (label.take(), x))
-                    })
-                },
-            )
-            .collect::<Result<Vec<(Option<&str>, Instruction)>, ParseError>>()?;
+            .map(|(n, line)| {
+                TokenizedLine::lex_line(n, line).map_err(|ty| ParseError {
+                    ty,
+                    line: n,
+                    code: line.to_string(),
+                })
+            })
+            .filter(|line| !line.is_ok_and(|x| x.tokens.is_empty()))
+            .collect::<Result<Vec<TokenizedLine>, ParseError>>()?;
+
+        // --- pass 2: give shadowed variables and labels unique IDs ---
+
+        let mut vars = HashMap::<String, usize>::new();
+        let mut labels = HashMap::<String, usize>::new();
+        for line in &document {
+            line.
+        }
+
+        // ---
 
         let label_map = exec_lines
             .iter()
