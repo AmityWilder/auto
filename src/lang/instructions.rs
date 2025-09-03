@@ -38,6 +38,27 @@ pub enum ArgDirection {
 }
 
 #[derive(Debug, Clone)]
+pub enum InstructionId {
+    Set,
+    Deref,
+    If,
+    Goto,
+    Eq,
+    AddInts,
+    AddColors,
+    AddPtrInt,
+    AddAssignInts,
+    AddAssignColors,
+    AddAssignPtrInt,
+    GetPixel,
+    Print,
+    Wait,
+    MoveMouse,
+    Key,
+    Button,
+}
+
+#[derive(Debug, Clone)]
 pub enum Instruction {
     Set {
         T: Type,
@@ -114,6 +135,30 @@ pub enum Instruction {
         action: Source,
         button: Source,
     },
+}
+
+impl Instruction {
+    pub const fn id(&self) -> InstructionId {
+        match self {
+            Self::Set { .. } => InstructionId::Set,
+            Self::Deref { .. } => InstructionId::Deref,
+            Self::If { .. } => InstructionId::If,
+            Self::Goto { .. } => InstructionId::Goto,
+            Self::Eq { .. } => InstructionId::Eq,
+            Self::AddInts { .. } => InstructionId::AddInts,
+            Self::AddColors { .. } => InstructionId::AddColors,
+            Self::AddPtrInt { .. } => InstructionId::AddPtrInt,
+            Self::AddAssignInts { .. } => InstructionId::AddAssignInts,
+            Self::AddAssignColors { .. } => InstructionId::AddAssignColors,
+            Self::AddAssignPtrInt { .. } => InstructionId::AddAssignPtrInt,
+            Self::GetPixel { .. } => InstructionId::GetPixel,
+            Self::Print { .. } => InstructionId::Print,
+            Self::Wait { .. } => InstructionId::Wait,
+            Self::MoveMouse { .. } => InstructionId::MoveMouse,
+            Self::Key { .. } => InstructionId::Key,
+            Self::Button { .. } => InstructionId::Button,
+        }
+    }
 }
 
 macro_rules! tf {

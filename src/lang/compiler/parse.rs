@@ -5,9 +5,9 @@ use crate::lang::{
     address::{Address, AddressRange, UAddr},
     compiler::{
         Program,
-        lex::{self, TokenizedLine},
+        lex::{self, Token, TokenType, TokenizedLine},
     },
-    instructions::{ArgDirection, Instruction},
+    instructions::{ArgDirection, Instruction, InstructionId},
     memory::Source,
     types::Type,
 };
@@ -16,6 +16,7 @@ use crate::lang::{
 pub enum ParseErrorType {
     UnknownInstruction(String),
     MalformedLabel(String),
+    DuplicateLabel(String),
     UnclosedString(String),
     UnknownVariable(String),
     InvalidLiteral(Type, String),
@@ -50,6 +51,7 @@ impl std::fmt::Display for ParseError {
         match &self.ty {
             UnknownInstruction(name) => write!(f, "unknown instruction: `{name}`"),
             MalformedLabel(label) => write!(f, "label `{label}` is missing a colon"),
+            DuplicateLabel(label) => write!(f, "label `{label}` appears multiple times"),
             UnclosedString(s) => write!(f, "string argument is mising a closing '\"': {s}"),
             UnknownVariable(name) => write!(f, "unknown variable: `{name}`"),
             InvalidLiteral(ty, value) => {
@@ -280,13 +282,96 @@ impl std::str::FromStr for Program {
             .filter(|line| !line.is_ok_and(|x| x.tokens.is_empty()))
             .collect::<Result<Vec<TokenizedLine>, ParseError>>()?;
 
-        // --- pass 2: give shadowed variables and labels unique IDs ---
+        // --- pass 2: give labels IDs ---
 
-        let mut vars = HashMap::<String, usize>::new();
-        let mut labels = HashMap::<String, usize>::new();
-        for line in &document {
-            line.
+        let mut lbl_id = 0;
+        let mut lbl_lookup = HashMap::<String, usize>::new();
+
+        for line in document.iter() {
+            if let Some(Token {
+                ty: TokenType::Label,
+                text,
+            }) = line.tokens.get(0)
+            {
+                if lbl_lookup.contains_key(text) {
+                    return Err(ParseError {
+                        ty: ParseErrorType::DuplicateLabel(text.to_string()),
+                        line: line.row,
+                        code: line.text,
+                    });
+                } else {
+                    lbl_lookup.insert(text.to_string(), lbl_id);
+                    lbl_id += 1;
+                }
+            }
         }
+
+        // --- pass 3: give shadowed variables unique IDs and replace labels with their IDs ---
+
+        enum Arg<'a> {
+            Var(usize),
+            Label(usize),
+            Other(Token<'a>),
+        }
+
+        enum HirLine<'a> {
+            Label {
+                row: usize,
+                label: usize,
+            },
+            Exec {
+                row: usize,
+                instruction: InstructionId,
+                args: Box<[Arg<'a>]>,
+            },
+        }
+
+        let mut var_id = 0;
+        let mut vars = HashMap::<String, usize>::new();
+
+        let hir = document
+            .iter()
+            .flat_map(|line| {
+                let mut it = line.tokens.into_iter().peekable();
+                let label = it.next_if(|token| {
+                    matches!(
+                        token,
+                        Some(Token {
+                            ty: TokenType::Label,
+                            ..
+                        })
+                    )
+                });
+                let ins = it.next_if(|token| {
+                    matches!(
+                        token,
+                        Some(Token {
+                            ty: TokenType::Instr,
+                            ..
+                        })
+                    )
+                });
+                std::iter::chain(
+                    label.map(|lbl| {
+                        Ok(HirLine::Label {
+                            row: line.row,
+                            label: lbl_lookup
+                                .get(lbl.text)
+                                .expect("all labels should have been discovered by label pass"),
+                        })
+                    }),
+                    ins.map(|ins| {
+                        Ok(HirLine::Exec {
+                            row: line.row,
+                            instruction: match ins.text {
+                                _ => todo!(),
+                            },
+                            args: it.map(|token| todo!()).collect(),
+                        })
+                    }),
+                )
+            })
+            .collect::<Result<Vec<LineHir>, ParseError>>()?;
 
         // ---
 
