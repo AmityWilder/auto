@@ -1,21 +1,25 @@
-use colored::Colorize;
-use std::collections::HashMap;
-
-use crate::lang::{
-    address::{Address, AddressRange, UAddr},
-    compiler::{
-        Program,
-        lex::{self, Token, TokenType, TokenizedLine},
+use crate::{
+    input::{KeyboardKey, MouseButton},
+    lang::{
+        address::{Address, AddressRange, UAddr},
+        compiler::{
+            Program,
+            lex::{Token, TokenType, TokenizedLine},
+        },
+        instructions::{ArgDirection, Instruction, InstructionId},
+        memory::Source,
+        types::Type,
     },
-    instructions::{ArgDirection, Instruction, InstructionId},
-    memory::Source,
-    types::Type,
+    screen::ColorRGB,
 };
+use enigo::{Coordinate, Direction};
+use std::{collections::HashMap, num::NonZeroUsize};
 
 #[derive(Debug)]
 pub enum ParseErrorType {
     UnknownInstruction(String),
     MalformedLabel(String),
+    ImmediateReference,
     DuplicateLabel(String),
     UnclosedString(String),
     UnknownVariable(String),
@@ -23,7 +27,7 @@ pub enum ParseErrorType {
     UnknownImmType(String),
     TypeDeductionFailed(&'static str),
     ArgCountMismatch {
-        instruction: &'static str,
+        instruction: InstructionId,
         expect: &'static [usize],
         actual: usize,
     },
@@ -51,6 +55,7 @@ impl std::fmt::Display for ParseError {
         match &self.ty {
             UnknownInstruction(name) => write!(f, "unknown instruction: `{name}`"),
             MalformedLabel(label) => write!(f, "label `{label}` is missing a colon"),
+            ImmediateReference => write!(f, "cannot reference an immediate value/reference"),
             DuplicateLabel(label) => write!(f, "label `{label}` appears multiple times"),
             UnclosedString(s) => write!(f, "string argument is mising a closing '\"': {s}"),
             UnknownVariable(name) => write!(f, "unknown variable: `{name}`"),
@@ -67,12 +72,12 @@ impl std::fmt::Display for ParseError {
                 write!(f, "could not deduce the type of generic argument `{id}`")
             }
             ArgCountMismatch {
-                instruction: ins,
+                instruction,
                 expect,
                 actual,
             } => write!(
                 f,
-                "`{ins}` takes {} arguments but {actual} were supplied",
+                "`{instruction}` takes {} arguments but {actual} were supplied",
                 match expect {
                     [] => unimplemented!(),
                     [n] => format!("{n}"),
@@ -279,13 +284,14 @@ impl std::str::FromStr for Program {
                     code: line.to_string(),
                 })
             })
-            .filter(|line| !line.is_ok_and(|x| x.tokens.is_empty()))
+            .filter(|line| !line.as_ref().is_ok_and(|x| x.tokens.is_empty()))
             .collect::<Result<Vec<TokenizedLine>, ParseError>>()?;
 
         // --- pass 2: give labels IDs ---
 
+        type LabelId = usize;
         let mut lbl_id = 0;
-        let mut lbl_lookup = HashMap::<String, usize>::new();
+        let mut lbl_lookup = HashMap::<String, LabelId>::new();
 
         for line in document.iter() {
             if let Some(Token {
@@ -293,31 +299,90 @@ impl std::str::FromStr for Program {
                 text,
             }) = line.tokens.get(0)
             {
-                if lbl_lookup.contains_key(text) {
+                if lbl_lookup.insert(text.to_string(), lbl_id).is_none() {
+                    lbl_id += 1;
+                } else {
                     return Err(ParseError {
                         ty: ParseErrorType::DuplicateLabel(text.to_string()),
                         line: line.row,
-                        code: line.text,
+                        code: line.text.to_string(),
                     });
-                } else {
-                    lbl_lookup.insert(text.to_string(), lbl_id);
-                    lbl_id += 1;
                 }
             }
         }
 
         // --- pass 3: give shadowed variables unique IDs and replace labels with their IDs ---
 
-        enum Arg<'a> {
-            Var(usize),
-            Label(usize),
-            Other(Token<'a>),
+        type VarId = usize;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        enum Referencing {
+            Direct,
+            Ref,
+            Derefs(NonZeroUsize),
         }
 
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        enum Arg<'a> {
+            Var { refr: Referencing, id: VarId },
+            Label(LabelId),
+            String(&'a str),
+            Bool(bool, &'a str),
+            Action(Direction, &'a str),
+            Coordinate(Coordinate, &'a str),
+            Button(MouseButton, &'a str),
+            Key(KeyboardKey, &'a str),
+            Number(i32, &'a str),
+            Color(ColorRGB, &'a str),
+        }
+
+        impl Arg<'_> {
+            fn get_type(&self) -> Option<Type> {
+                match self {
+                    Self::Var { refr, id } => todo!(),
+                    Self::Label(_) => Some(Type::Label),
+                    Self::String(_) => Some(Type::Str),
+                    Self::Bool(_, _) => Some(Type::Bool),
+                    Self::Action(direction, _) => Some(Type::Action),
+                    Self::Coordinate(coordinate, _) => Some(Type::Coordinate),
+                    Self::Button(button, _) => Some(Type::Button),
+                    Self::Key(key, _) => Some(Type::Key),
+                    Self::Number(_, _) => Some(Type::Int),
+                    Self::Color(color_rgb, _) => Some(Type::Color),
+                }
+            }
+
+            fn into_source(
+                self,
+                lbl_addresses: &[Address],
+                var_addresses: &[AddressRange],
+            ) -> Source {
+                match self {
+                    Self::Var { refr, id } => todo!(),
+                    Self::Label(id) => {
+                        Source::Immediate(Box::from(lbl_addresses[id].0.to_ne_bytes()))
+                    }
+                    Self::String(s) => Source::Immediate(Box::from(s.as_bytes())),
+                    Self::Bool(value, _) => Source::Immediate(Box::from([value as u8])),
+                    Self::Action(direction, _) => Source::Immediate(Box::from([direction as u8])),
+                    Self::Coordinate(coordinate, _) => {
+                        Source::Immediate(Box::from([coordinate as u8]))
+                    }
+                    Self::Button(button, _) => Source::Immediate(Box::from(button.to_ne_bytes())),
+                    Self::Key(key, _) => Source::Immediate(Box::from(key.to_ne_bytes())),
+                    Self::Number(int, _) => Source::Immediate(Box::from(int.to_ne_bytes())),
+                    Self::Color(color, _) => Source::Immediate(Box::from(unsafe {
+                        std::mem::transmute::<ColorRGB, [u8; size_of::<ColorRGB>()]>(color)
+                    })),
+                }
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
         enum HirLine<'a> {
             Label {
                 row: usize,
-                label: usize,
+                label: LabelId,
             },
             Exec {
                 row: usize,
@@ -326,126 +391,417 @@ impl std::str::FromStr for Program {
             },
         }
 
-        let mut var_id = 0;
-        let mut vars = HashMap::<String, usize>::new();
+        let mut var_lookup = HashMap::<String, VarId>::new();
+        let mut var_types = Vec::<Option<Type>>::new();
 
         let hir = document
-            .iter()
+            .into_iter()
             .flat_map(|line| {
+                let line_number = line.row;
+                let line_text = line.text;
                 let mut it = line.tokens.into_iter().peekable();
-                let label = it.next_if(|token| {
-                    matches!(
-                        token,
-                        Some(Token {
-                            ty: TokenType::Label,
-                            ..
-                        })
-                    )
-                });
-                let ins = it.next_if(|token| {
-                    matches!(
-                        token,
-                        Some(Token {
-                            ty: TokenType::Instr,
-                            ..
-                        })
-                    )
-                });
-                std::iter::chain(
-                    label.map(|lbl| {
+
+                let label = it
+                    .next_if(|token| token.ty == TokenType::Label)
+                    .map(|lbl| {
                         Ok(HirLine::Label {
-                            row: line.row,
+                            row: line_number,
                             label: lbl_lookup
                                 .get(lbl.text)
+                                .copied()
                                 .expect("all labels should have been discovered by label pass"),
                         })
-                    }),
-                    ins.map(|ins| {
+                    })
+                    .into_iter();
+
+                let mut leading_amp = false;
+                let mut stars: usize = 0;
+                let ins = it
+                    .next_if(|token| token.ty == TokenType::Instr)
+                    .map(|ins| {
                         Ok(HirLine::Exec {
-                            row: line.row,
-                            instruction: match ins.text {
-                                _ => todo!(),
-                            },
-                            args: it.map(|token| todo!()).collect(),
+                            row: line_number,
+                            instruction: ins.text.parse::<InstructionId>().map_err(|()| {
+                                ParseError {
+                                    ty: ParseErrorType::UnknownInstruction(ins.text.to_string()),
+                                    line: line_number,
+                                    code: line_text.to_string(),
+                                }
+                            })?,
+                            args: it
+                                .filter(|token| match token.ty {
+                                    TokenType::Amp => {
+                                        if leading_amp {
+                                            stars = stars
+                                                .checked_sub(1)
+                                                .ok_or(ParseErrorType::ImmediateReference)
+                                                .expect("todo: find a way to return this error");
+                                        } else {
+                                            leading_amp = true;
+                                        }
+                                        false
+                                    }
+                                    TokenType::Star => {
+                                        stars += 1;
+                                        false
+                                    }
+                                    _ => true,
+                                })
+                                .map(|token| {
+                                    match token.ty {
+                                        TokenType::LabelRef => lbl_lookup
+                                            .get(token.text)
+                                            .copied()
+                                            .map(Arg::Label)
+                                            .ok_or_else(|| {
+                                                ParseErrorType::InvalidLiteral(
+                                                    Type::Label,
+                                                    token.text.to_string(),
+                                                )
+                                            }),
+
+                                        TokenType::Name => {
+                                            let id = match var_lookup.get(token.text).copied() {
+                                                Some(id) => id,
+                                                None => {
+                                                    let id = var_types.len();
+                                                    var_types.push(None);
+                                                    _ = var_lookup
+                                                        .insert(token.text.to_string(), id);
+                                                    id
+                                                }
+                                            };
+                                            Ok(Arg::Var {
+                                                leading_amp,
+                                                stars,
+                                                id,
+                                            })
+                                        }
+
+                                        TokenType::String => Ok(Arg::String(token.text)),
+                                        TokenType::Enum => match token.text {
+                                            "True" => Ok(Arg::Bool(true, token.text)),
+                                            "False" => Ok(Arg::Bool(false, token.text)),
+                                            "Press" => {
+                                                Ok(Arg::Action(Direction::Press, token.text))
+                                            }
+                                            "Release" => {
+                                                Ok(Arg::Action(Direction::Release, token.text))
+                                            }
+                                            "Click" => {
+                                                Ok(Arg::Action(Direction::Click, token.text))
+                                            }
+                                            "Abs" => {
+                                                Ok(Arg::Coordinate(Coordinate::Abs, token.text))
+                                            }
+                                            "Rel" => {
+                                                Ok(Arg::Coordinate(Coordinate::Rel, token.text))
+                                            }
+                                            _ => {
+                                                if let Ok(button) = token.text.parse() {
+                                                    Ok(Arg::Button(button, token.text))
+                                                } else if let Ok(key) = token.text.parse() {
+                                                    Ok(Arg::Key(key, token.text))
+                                                } else {
+                                                    Err(ParseErrorType::UnknownImmType(
+                                                        token.text.to_string(),
+                                                    ))
+                                                }
+                                            }
+                                        },
+                                        TokenType::Number => token
+                                            .text
+                                            .parse()
+                                            .map(|x| Arg::Number(x, token.text))
+                                            .map_err(|_| {
+                                                ParseErrorType::InvalidLiteral(
+                                                    Type::Int,
+                                                    token.text.to_string(),
+                                                )
+                                            }),
+                                        TokenType::Color => token
+                                            .text
+                                            .parse()
+                                            .map(|x| Arg::Color(x, token.text))
+                                            .map_err(|_| {
+                                                ParseErrorType::InvalidLiteral(
+                                                    Type::Color,
+                                                    token.text.to_string(),
+                                                )
+                                            }),
+
+                                        TokenType::Label | TokenType::Instr => {
+                                            unreachable!("can only be at the start of the line")
+                                        }
+
+                                        TokenType::Amp | TokenType::Star => {
+                                            unreachable!("should have been filtered out")
+                                        }
+                                    }
+                                    .map_err(|ty| ParseError {
+                                        ty,
+                                        line: line_number,
+                                        code: line_text.to_string(),
+                                    })
+                                })
+                                .collect::<Result<Box<[Arg]>, ParseError>>()?,
                         })
-                    }),
-                )
+                    })
+                    .into_iter();
+
+                label.chain(ins)
             })
-            .collect::<Result<Vec<LineHir>, ParseError>>()?;
+            .collect::<Result<Vec<HirLine>, ParseError>>()?
+            .into_boxed_slice();
 
-        // ---
+        // --- pass 4: Optimizations ---
 
-        let label_map = exec_lines
-            .iter()
-            .enumerate()
-            .filter_map(|(n, (l, _))| l.map(|l| (l.to_string(), Address(n as UAddr))))
-            .collect::<HashMap<String, Address>>();
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        enum MirLine<'a> {
+            Initialize { var: VarId },
+            Hir(HirLine<'a>),
+        }
 
-        let code = exec_lines
+        let mir = hir
             .into_iter()
-            .map(|(_, mut c)| {
-                fn label_bytes_to_address(
-                    label_map: &HashMap<String, Address>,
-                    bytes: &[u8],
-                ) -> Box<[u8]> {
-                    Box::from(
-                        label_map
-                            .get(str::from_utf8(bytes).unwrap())
-                            .unwrap()
-                            .0
-                            .to_ne_bytes(),
-                    )
-                }
-                match &mut c {
-                    Instruction::Set {
-                        T: Type::Label,
-                        dest: _,
-                        src: Source::Immediate(label),
-                    }
-                    | Instruction::Deref {
-                        T: Type::Label,
-                        dest: _,
-                        src: Source::Immediate(label),
-                    }
-                    | Instruction::Eq {
-                        T: Type::Label,
-                        dest: _,
-                        lhs: Source::Immediate(label),
-                        rhs: Source::Address(_),
-                    }
-                    | Instruction::Eq {
-                        T: Type::Label,
-                        dest: _,
-                        lhs: Source::Address(_),
-                        rhs: Source::Immediate(label),
-                    }
-                    | Instruction::Goto {
-                        label: Source::Immediate(label),
-                    } => *label = label_bytes_to_address(&label_map, label),
+            .map(|line| Ok(MirLine::Hir(line))) // TODO: Add actual optimizations
+            .collect::<Result<Vec<MirLine>, ParseError>>()?
+            .into_boxed_slice();
 
-                    Instruction::Eq {
-                        T: Type::Label,
-                        dest: _,
-                        lhs: Source::Immediate(label1),
-                        rhs: Source::Immediate(label2),
-                    } => {
-                        *label1 = label_bytes_to_address(&label_map, label1);
-                        *label2 = label_bytes_to_address(&label_map, label2);
-                    }
+        // --- pass 5: Compile into runnable instructions ---
 
-                    Instruction::Print { what } => {
-                        for label in what.iter_mut().filter_map(|x| match x {
-                            (Type::Label, Source::Immediate(label)) => Some(label),
-                            _ => None,
-                        }) {
-                            *label = label_bytes_to_address(&label_map, label);
-                        }
-                    }
-                    _ => {}
+        let var_types = var_types
+            .into_iter()
+            .map(|ty| ty.expect("all types should be known by this point"))
+            .collect::<Vec<Type>>();
+
+        let var_addresses = {
+            let mut start = Address(0);
+            var_types
+                .iter()
+                .map(|ty| {
+                    let size = ty.size().map_err(|e| todo!("size error"))?;
+
+                    let end = Address(start.0.wrapping_add(size));
+
+                    AddressRange::new(start, end)
+                        .inspect(|_| start = end)
+                        .ok_or(ParseErrorType::OutOfMemory {
+                            requested: Some(size),
+                        })
+                })
+                .collect::<Result<Vec<AddressRange>, ParseErrorType>>()
+                .map_err(|ty| ParseError {
+                    ty,
+                    line: 0,
+                    code: "".to_string(), // hm...
+                })?
+        };
+
+        #[allow(non_snake_case)]
+        let code = mir
+            .into_iter()
+            .map(|line| {
+                match line {
+                    MirLine::Initialize { var } => todo!(),
+                    MirLine::Hir(hir_line) => match hir_line {
+                        HirLine::Label { row, label } => todo!(),
+                        HirLine::Exec {
+                            row,
+                            instruction,
+                            args,
+                        } => match instruction {
+                            InstructionId::Set => match &*args {
+                                &[dest @ Arg::Var { id, .. }, src] => Ok(Instruction::Set {
+                                    T: var_types[id],
+                                    dest: var_addresses[id],
+                                    src: src,
+                                }),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::Deref => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::If => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::Goto => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::Not => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::Eq => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::Add => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::GetPixel => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::Print => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::Wait => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::MoveMouse => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::Key => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                            InstructionId::Button => match &*args {
+                                &[] => todo!(),
+                                _ => Err(ParseErrorType::ArgCountMismatch {
+                                    instruction,
+                                    expect: &[2],
+                                    actual: args.len(),
+                                }),
+                            },
+                        },
+                    },
                 }
-                c
+                .map_err(|ty| ParseError {
+                    ty,
+                    line: todo!(),
+                    code: todo!(),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<Instruction>, ParseError>>()?
+            .into_boxed_slice();
+
+        // let label_map = exec_lines
+        //     .iter()
+        //     .enumerate()
+        //     .filter_map(|(n, (l, _))| l.map(|l| (l.to_string(), Address(n as UAddr))))
+        //     .collect::<HashMap<String, Address>>();
+
+        // let code = exec_lines
+        //     .into_iter()
+        //     .map(|(_, mut c)| {
+        //         fn label_bytes_to_address(
+        //             label_map: &HashMap<String, Address>,
+        //             bytes: &[u8],
+        //         ) -> Box<[u8]> {
+        //             Box::from(
+        //                 label_map
+        //                     .get(str::from_utf8(bytes).unwrap())
+        //                     .unwrap()
+        //                     .0
+        //                     .to_ne_bytes(),
+        //             )
+        //         }
+        //         match &mut c {
+        //             Instruction::Set {
+        //                 T: Type::Label,
+        //                 dest: _,
+        //                 src: Source::Immediate(label),
+        //             }
+        //             | Instruction::Deref {
+        //                 T: Type::Label,
+        //                 dest: _,
+        //                 src: Source::Immediate(label),
+        //             }
+        //             | Instruction::Eq {
+        //                 T: Type::Label,
+        //                 dest: _,
+        //                 lhs: Source::Immediate(label),
+        //                 rhs: Source::Address(_),
+        //             }
+        //             | Instruction::Eq {
+        //                 T: Type::Label,
+        //                 dest: _,
+        //                 lhs: Source::Address(_),
+        //                 rhs: Source::Immediate(label),
+        //             }
+        //             | Instruction::Goto {
+        //                 label: Source::Immediate(label),
+        //             } => *label = label_bytes_to_address(&label_map, label),
+
+        //             Instruction::Eq {
+        //                 T: Type::Label,
+        //                 dest: _,
+        //                 lhs: Source::Immediate(label1),
+        //                 rhs: Source::Immediate(label2),
+        //             } => {
+        //                 *label1 = label_bytes_to_address(&label_map, label1);
+        //                 *label2 = label_bytes_to_address(&label_map, label2);
+        //             }
+
+        //             Instruction::Print { what } => {
+        //                 for label in what.iter_mut().filter_map(|x| match x {
+        //                     (Type::Label, Source::Immediate(label)) => Some(label),
+        //                     _ => None,
+        //                 }) {
+        //                     *label = label_bytes_to_address(&label_map, label);
+        //                 }
+        //             }
+        //             _ => {}
+        //         }
+        //         c
+        //     })
+        //     .collect();
 
         // for line in exec_lines {
         //     if

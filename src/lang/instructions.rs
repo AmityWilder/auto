@@ -1,10 +1,20 @@
 #![allow(non_snake_case)]
 
-use crate::lang::{
-    address::AddressRange,
-    compiler::parse::{ParseErrorType, VarTable},
-    memory::Source,
-    types::Type,
+use enigo::{Button, Coordinate, Direction, Key};
+
+use crate::{
+    lang::{
+        address::AddressRange,
+        compiler::parse::{ParseErrorType, VarTable},
+        memory::Source,
+        types::Type,
+    },
+    screen::ColorRGB,
+};
+
+use super::{
+    address::{Address, TypedAddress},
+    memory::TypedSource,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,25 +47,73 @@ pub enum ArgDirection {
     Out,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InstructionId {
     Set,
     Deref,
     If,
     Goto,
+    /// - [`Instruction::Not`]
+    /// - [`Instruction::NotAssign`]
+    Not,
     Eq,
-    AddInts,
-    AddColors,
-    AddPtrInt,
-    AddAssignInts,
-    AddAssignColors,
-    AddAssignPtrInt,
+    /// - [`Instruction::AddInts`]
+    /// - [`Instruction::AddColors`]
+    /// - [`Instruction::AddPtrInt`]
+    /// - [`Instruction::AddAssignInts`]
+    /// - [`Instruction::AddAssignColors`]
+    /// - [`Instruction::AddAssignPtrInt`]
+    Add,
     GetPixel,
     Print,
     Wait,
     MoveMouse,
     Key,
     Button,
+}
+
+impl std::fmt::Display for InstructionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Set => "set",
+            Self::Deref => "*",
+            Self::If => "if",
+            Self::Goto => "goto",
+            Self::Not => "not",
+            Self::Eq => "eq",
+            Self::Add => "add",
+            Self::GetPixel => "getpx",
+            Self::Print => "print",
+            Self::Wait => "wait",
+            Self::MoveMouse => "mouse",
+            Self::Key => "kb",
+            Self::Button => "mb",
+        }
+        .fmt(f)
+    }
+}
+
+impl std::str::FromStr for InstructionId {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "set" => Ok(Self::Set),
+            "*" => Ok(Self::Deref),
+            "if" => Ok(Self::If),
+            "goto" => Ok(Self::Goto),
+            "not" => Ok(Self::Not),
+            "eq" => Ok(Self::Eq),
+            "add" => Ok(Self::Add),
+            "getpx" => Ok(Self::GetPixel),
+            "print" => Ok(Self::Print),
+            "wait" => Ok(Self::Wait),
+            "mouse" => Ok(Self::MoveMouse),
+            "kb" => Ok(Self::Key),
+            "mb" => Ok(Self::Button),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -71,40 +129,47 @@ pub enum Instruction {
         src: Source,
     },
     If {
-        cond: Source,
+        cond: TypedSource<bool>,
     },
     Goto {
-        label: Source,
+        label: TypedSource<Address>,
+    },
+    Not {
+        dest: TypedAddress<bool>,
+        value: TypedSource<bool>,
+    },
+    NotAssign {
+        dest: TypedAddress<bool>,
     },
     Eq {
         T: Type,
-        dest: AddressRange,
+        dest: TypedAddress<bool>,
         lhs: Source,
         rhs: Source,
     },
     AddInts {
-        dest: AddressRange,
-        lhs: Source,
-        rhs: Source,
+        dest: TypedAddress<i32>,
+        lhs: TypedSource<i32>,
+        rhs: TypedSource<i32>,
     },
     AddColors {
-        dest: AddressRange,
-        lhs: Source,
-        rhs: Source,
+        dest: TypedAddress<ColorRGB>,
+        lhs: TypedSource<ColorRGB>,
+        rhs: TypedSource<ColorRGB>,
     },
     AddPtrInt {
         T: Type,
         dest: AddressRange,
         lhs: Source,
-        rhs: Source,
+        rhs: TypedSource<i32>,
     },
     AddAssignInts {
-        dest: AddressRange,
-        rhs: Source,
+        dest: TypedAddress<i32>,
+        rhs: TypedSource<i32>,
     },
     AddAssignColors {
-        dest: AddressRange,
-        rhs: Source,
+        dest: TypedAddress<ColorRGB>,
+        rhs: TypedSource<ColorRGB>,
     },
     AddAssignPtrInt {
         T: Type,
@@ -112,28 +177,28 @@ pub enum Instruction {
         rhs: Source,
     },
     GetPixel {
-        dest: AddressRange,
-        x: Source,
-        y: Source,
+        dest: TypedAddress<ColorRGB>,
+        x: TypedSource<i32>,
+        y: TypedSource<i32>,
     },
     Print {
         what: Box<[(Type, Source)]>,
     },
     Wait {
-        ms: Source,
+        ms: TypedSource<i32>,
     },
     MoveMouse {
-        coord: Source,
-        x: Source,
-        y: Source,
+        coord: TypedSource<Coordinate>,
+        x: TypedSource<i32>,
+        y: TypedSource<i32>,
     },
     Key {
-        action: Source,
-        key: Source,
+        action: TypedSource<Direction>,
+        key: TypedSource<Key>,
     },
     Button {
-        action: Source,
-        button: Source,
+        action: TypedSource<Direction>,
+        button: TypedSource<Button>,
     },
 }
 
@@ -144,13 +209,15 @@ impl Instruction {
             Self::Deref { .. } => InstructionId::Deref,
             Self::If { .. } => InstructionId::If,
             Self::Goto { .. } => InstructionId::Goto,
+            Self::Not { .. } => InstructionId::Not,
+            Self::NotAssign { .. } => InstructionId::Not,
             Self::Eq { .. } => InstructionId::Eq,
-            Self::AddInts { .. } => InstructionId::AddInts,
-            Self::AddColors { .. } => InstructionId::AddColors,
-            Self::AddPtrInt { .. } => InstructionId::AddPtrInt,
-            Self::AddAssignInts { .. } => InstructionId::AddAssignInts,
-            Self::AddAssignColors { .. } => InstructionId::AddAssignColors,
-            Self::AddAssignPtrInt { .. } => InstructionId::AddAssignPtrInt,
+            Self::AddInts { .. } => InstructionId::Add,
+            Self::AddColors { .. } => InstructionId::Add,
+            Self::AddPtrInt { .. } => InstructionId::Add,
+            Self::AddAssignInts { .. } => InstructionId::Add,
+            Self::AddAssignColors { .. } => InstructionId::Add,
+            Self::AddAssignPtrInt { .. } => InstructionId::Add,
             Self::GetPixel { .. } => InstructionId::GetPixel,
             Self::Print { .. } => InstructionId::Print,
             Self::Wait { .. } => InstructionId::Wait,
@@ -177,195 +244,6 @@ fn any_type(_: &Type) -> bool {
     true
 }
 
-impl Instruction {
-    pub(super) fn from_str<'a>(
-        stack: &mut VarTable,
-        ins: &'a str,
-        args: &[&'a str],
-    ) -> Result<Instruction, ParseErrorType> {
-        use ArgDirection::*;
-
-        match (ins, args) {
-            ("set", &[dest, src]) => {
-                let T = stack.deduce("T", [(Out, dest, None), (In, src, None)], any_type)?;
-                let dest = stack.lookup_out(Out, dest, &T)?;
-                let src = stack.lookup(In, src, &T)?;
-                Ok(Self::Set { T, dest, src })
-            }
-            ("set", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "set",
-                expect: &[2],
-                actual: args.len(),
-            }),
-            ("if", &[cond]) => {
-                let cond = stack.lookup(In, cond, &Type::Bool)?;
-                Ok(Self::If { cond })
-            }
-            ("if", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "if",
-                expect: &[1],
-                actual: args.len(),
-            }),
-            ("goto", &[label]) => {
-                let label = stack.lookup(In, label, &Type::Label)?;
-                Ok(Self::Goto { label })
-            }
-            ("goto", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "goto",
-                expect: &[1],
-                actual: args.len(),
-            }),
-            ("eq", &[dest, lhs, rhs]) => {
-                let T = stack.deduce("T", [(In, lhs, None), (In, rhs, None)], any_type)?;
-                let dest = stack.lookup_out(Out, dest, &Type::Bool)?;
-                let lhs = stack.lookup(In, lhs, &T)?;
-                let rhs = stack.lookup(In, rhs, &T)?;
-                Ok(Self::Eq { T, dest, lhs, rhs })
-            }
-            ("eq", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "eq",
-                expect: &[3],
-                actual: args.len(),
-            }),
-            ("*", &[dest, src]) => {
-                let T = stack.deduce(
-                    "T",
-                    [
-                        (Out, dest, None),
-                        (In, src, tf!(Type::Pointer(Some(ty)) => Some(Ok(*ty)))),
-                    ],
-                    any_type,
-                )?;
-                let dest = stack.lookup_out(Out, dest, &T)?;
-                let src = stack
-                    .lookup(In, src, &Type::Pointer(Some(Box::new(T.clone()))))
-                    .or_else(|_| stack.lookup(In, src, &Type::Pointer(None)))?;
-                Ok(Self::Deref { T, dest, src })
-            }
-            ("*", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "*",
-                expect: &[2],
-                actual: args.len(),
-            }),
-            ("add", &[dest, lhs, rhs]) => {
-                let T = stack.deduce(
-                    "T",
-                    [(In, lhs, None), (Out, dest, None), (In, rhs, None)],
-                    req!(Type::Int | Type::Color | Type::Pointer(Some(_))),
-                )?;
-                let U = stack.deduce("U", [(In, rhs, None)], |ty| {
-                    matches!(
-                        (&T, ty),
-                        (Type::Int, Type::Int)
-                            | (Type::Color, Type::Color | Type::Int)
-                            | (Type::Pointer(Some(_)), Type::Int)
-                    )
-                })?;
-                let dest = stack.lookup_out(Out, dest, &T)?;
-                let lhs = stack.lookup(In, lhs, &T)?;
-                let rhs = stack.lookup(In, rhs, &U)?;
-                Ok(match (&T, &U) {
-                    (Type::Int, Type::Int) => Self::AddInts { dest, lhs, rhs },
-                    (Type::Color, Type::Color) => Self::AddColors { dest, lhs, rhs },
-                    (Type::Pointer(Some(_)), Type::Int) => Self::AddPtrInt { T, dest, lhs, rhs },
-                    _ => unreachable!(),
-                })
-            }
-            ("add", &[dest, rhs]) => {
-                let T = stack.deduce(
-                    "T",
-                    [(InOut, dest, None)],
-                    req!(Type::Int | Type::Color | Type::Pointer(Some(_))),
-                )?;
-                let U = stack.deduce("U", [(In, rhs, None)], |ty| {
-                    matches!(
-                        (&T, ty),
-                        (Type::Int, Type::Int)
-                            | (Type::Color, Type::Color | Type::Int)
-                            | (Type::Pointer(Some(_)), Type::Int)
-                    )
-                })?;
-                let dest = stack.lookup_out(InOut, dest, &T)?;
-                let rhs = stack.lookup(In, rhs, &U)?;
-                Ok(match (&T, &U) {
-                    (Type::Int, Type::Int) => Self::AddAssignInts { dest, rhs },
-                    (Type::Color, Type::Color) => Self::AddAssignColors { dest, rhs },
-                    (Type::Pointer(Some(_)), Type::Int) => Self::AddAssignPtrInt { T, dest, rhs },
-                    _ => unreachable!(),
-                })
-            }
-            ("add", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "add",
-                expect: &[1, 2],
-                actual: args.len(),
-            }),
-            ("getpx", &[dest, x, y]) => {
-                let dest = stack.lookup_out(Out, dest, &Type::Color)?;
-                let x = stack.lookup(In, x, &Type::Int)?;
-                let y = stack.lookup(In, y, &Type::Int)?;
-                Ok(Self::GetPixel { dest, x, y })
-            }
-            ("getpx", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "getpx",
-                expect: &[3],
-                actual: args.len(),
-            }),
-            ("print", what) => {
-                let what = what
-                    .iter()
-                    .map(|&what| {
-                        let T = stack.deduce("T", [(In, what, None)], any_type)?;
-                        let msg = stack.lookup(In, what, &T)?;
-                        Ok((T, msg))
-                    })
-                    .collect::<Result<_, ParseErrorType>>()?;
-                Ok(Self::Print { what })
-            }
-            ("wait", &[ms]) => {
-                let ms = stack.lookup(In, ms, &Type::Int)?;
-                Ok(Self::Wait { ms })
-            }
-            ("wait", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "wait",
-                expect: &[1],
-                actual: args.len(),
-            }),
-            ("mouse", &[coord, x, y]) => {
-                let coord = stack.lookup(In, coord, &Type::Coordinate)?;
-                let x = stack.lookup(In, x, &Type::Int)?;
-                let y = stack.lookup(In, y, &Type::Int)?;
-                Ok(Self::MoveMouse { coord, x, y })
-            }
-            ("mouse", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "mouse",
-                expect: &[3],
-                actual: args.len(),
-            }),
-            ("kb", &[action, key]) => {
-                let action = stack.lookup(In, action, &Type::Action)?;
-                let key = stack.lookup(In, key, &Type::Key)?;
-                Ok(Self::Key { action, key })
-            }
-            ("kb", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "kb",
-                expect: &[2],
-                actual: args.len(),
-            }),
-            ("mb", &[action, button]) => {
-                let action = stack.lookup(In, action, &Type::Action)?;
-                let button = stack.lookup(In, button, &Type::Button)?;
-                Ok(Self::Button { action, button })
-            }
-            ("mb", _) => Err(ParseErrorType::ArgCountMismatch {
-                instruction: "mb",
-                expect: &[2],
-                actual: args.len(),
-            }),
-            _ => Err(ParseErrorType::UnknownInstruction(ins.to_string())),
-        }
-    }
-}
-
 impl std::fmt::Display for Instruction {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -373,6 +251,12 @@ impl std::fmt::Display for Instruction {
             Self::Set { T, dest, src } => write!(f, "Set<T = {T}>(dest: {dest}, src: {src})"),
             Self::If { cond } => write!(f, "If(cond: {cond})"),
             Self::Goto { label } => write!(f, "Goto(label: {label})"),
+            Self::Not { dest, value } => {
+                write!(f, "Not(dest: {dest}, value: {value})")
+            }
+            Self::NotAssign { dest } => {
+                write!(f, "NotAssign(dest: {dest})")
+            }
             Self::Eq { T, dest, lhs, rhs } => {
                 write!(f, "Eq<T = {T}>(dest: {dest}, lhs: {lhs}, rhs: {rhs})")
             }

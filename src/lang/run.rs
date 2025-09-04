@@ -126,7 +126,18 @@ impl Instruction {
                 let label = label.get_as::<Address>(ram)?;
 
                 *counter = label.0;
-                return Ok(());
+                return Ok(()); // skip counter increment
+            }
+            Self::Not { dest, value } => {
+                let value = *value.get_as::<bool>(ram)?;
+                let dest = dest.get_mut_as::<bool>(ram)?;
+
+                *dest = !value;
+            }
+            Self::NotAssign { dest } => {
+                let dest = dest.get_mut_as::<bool>(ram)?;
+
+                *dest = !*dest;
             }
             Self::Eq {
                 T: _,

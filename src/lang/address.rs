@@ -1,8 +1,11 @@
+use std::marker::PhantomData;
+
 use crate::lang::{memory::Memory, run::RuntimeError};
 
 pub type UAddr = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
 pub struct Address(pub UAddr);
 
 impl std::fmt::Display for Address {
@@ -53,6 +56,53 @@ impl Address {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct TypedAddress<T>(Address, PhantomData<T>);
+
+impl<T> Clone for TypedAddress<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for TypedAddress<T> {}
+
+impl<T> TypedAddress<T> {
+    #[inline]
+    pub fn new(range: AddressRange) -> Option<Self> {
+        (range.size() == Self::size()).then_some(Self(range.start, PhantomData))
+    }
+
+    pub fn into_range(self) -> Result<AddressRange, RuntimeError> {
+        let start = self.0;
+        let size = Self::size();
+        let end = Address(
+            start
+                .0
+                .checked_add(size)
+                .ok_or(RuntimeError::AddressOverflow(start, size))?,
+        );
+        // SAFETY: Unsigned addition without overflow will never get smaller
+        Ok(unsafe { AddressRange::new_unchecked(start, end) })
+    }
+
+    #[inline]
+    pub fn size() -> UAddr {
+        UAddr::try_from(size_of::<T>()).expect("static types should never fail this")
+    }
+
+    #[inline]
+    pub fn get<'a>(&'a self, ram: &'a Memory) -> Result<&'a T, RuntimeError> {
+        ram.get_as::<T>(self.into_range()?) // todo: this adds unnecessary checks
+    }
+
+    #[inline]
+    pub fn get_mut<'a>(&'a self, ram: &'a mut Memory) -> Result<&'a mut T, RuntimeError> {
+        ram.get_mut_as::<T>(self.into_range()?) // todo: this adds unnecessary checks
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AddressRange {
     start: Address,
@@ -95,6 +145,7 @@ impl AddressRange {
         }
     }
 
+    #[inline]
     pub const fn new(start: Address, end: Address) -> Option<Self> {
         if end.0 >= start.0 {
             Some(Self { start, end })
@@ -137,22 +188,27 @@ impl AddressRange {
         unsafe { self.end.0.unchecked_sub(self.start.0) }
     }
 
+    #[inline]
     pub fn get<'a>(&'a self, ram: &'a Memory) -> Result<&'a [u8], RuntimeError> {
         ram.get(*self)
     }
 
+    #[inline]
     pub fn get_as<'a, T>(&'a self, ram: &'a Memory) -> Result<&'a T, RuntimeError> {
         ram.get_as(*self)
     }
 
+    #[inline]
     pub fn get_as_str<'a>(&'a self, ram: &'a Memory) -> Result<&'a str, RuntimeError> {
         ram.get_as_str(*self)
     }
 
+    #[inline]
     pub fn get_mut<'a>(&'a self, ram: &'a mut Memory) -> Result<&'a mut [u8], RuntimeError> {
         ram.get_mut(*self)
     }
 
+    #[inline]
     pub fn get_mut_as<'a, T>(&'a self, ram: &'a mut Memory) -> Result<&'a mut T, RuntimeError> {
         ram.get_mut_as(*self)
     }

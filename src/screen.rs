@@ -1,3 +1,4 @@
+#[cfg(target_os = "windows")]
 use windows::Win32::{
     Foundation::{COLORREF, HWND},
     Graphics::Gdi::{CLR_INVALID, GetDC, GetPixel, HDC, ReleaseDC},
@@ -21,9 +22,11 @@ impl std::fmt::Display for ScreenError {
 
 impl std::error::Error for ScreenError {}
 
+#[cfg(target_os = "windows")]
 #[derive(Debug)]
 pub struct Hdc(Option<HWND>, HDC);
 
+#[cfg(target_os = "windows")]
 impl Drop for Hdc {
     fn drop(&mut self) {
         let mut tmp = std::mem::MaybeUninit::uninit();
@@ -34,6 +37,7 @@ impl Drop for Hdc {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl Hdc {
     /// The `GetDC` function retrieves a handle to a device context (DC) for the client area of a specified window or for the entire
     /// screen. You can use the returned handle in subsequent GDI functions to draw in the DC. The device context is an opaque
@@ -168,7 +172,22 @@ impl Hdc {
     }
 }
 
+#[cfg(target_os = "windows")]
 pub type Screen = Hdc;
+
+#[cfg(not(target_os = "windows"))]
+pub struct Screen(());
+
+#[cfg(not(target_os = "windows"))]
+impl Screen {
+    pub unsafe fn new(_: Option<()>) -> Option<Self> {
+        Some(Self(()))
+    }
+
+    pub unsafe fn get_pixel(&self, x: i32, y: i32) -> Result<ColorRef, ScreenError> {
+        Err(ScreenError::OutsideClippingRegion { x, y })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ColorRef(pub u32);
@@ -199,7 +218,14 @@ impl std::str::FromStr for ColorRGB {
 impl ColorRef {
     #[inline]
     pub const fn is_invalid(self) -> bool {
-        self.0 == CLR_INVALID
+        #[cfg(target_os = "windows")]
+        {
+            self.0 == CLR_INVALID
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            unimplemented!()
+        }
     }
 
     #[inline]

@@ -3,6 +3,61 @@ use crate::lang::{
     run::RuntimeError,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypedSource<T> {
+    Immediate(T),
+    Address(Address),
+}
+
+impl<T: Default> Default for TypedSource<T> {
+    fn default() -> Self {
+        Self::Immediate(T::default())
+    }
+}
+
+impl<T> TypedSource<T> {
+    pub fn get<'a>(&'a self, ram: &'a Memory) -> Result<&'a T, RuntimeError> {
+        match self {
+            Self::Immediate(value) => Ok(value),
+            Self::Address(addr) => ram.get_as::<T>(
+                addr.range(
+                    size_of::<T>()
+                        .try_into()
+                        .map_err(|_| RuntimeError::TypeSizeOverflow(todo!()))?,
+                )?,
+            ),
+        }
+    }
+
+    pub fn get_mut<'a>(&'a mut self, ram: &'a mut Memory) -> Result<&'a mut T, RuntimeError> {
+        match self {
+            Self::Immediate(value) => Ok(value),
+            Self::Address(addr) => ram.get_mut_as::<T>(
+                addr.range(
+                    size_of::<T>()
+                        .try_into()
+                        .map_err(|_| RuntimeError::TypeSizeOverflow(todo!()))?,
+                )?,
+            ),
+        }
+    }
+}
+
+pub trait TypedSourceDisplay {}
+
+impl std::fmt::Display for TypedSource<bool> {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Immediate(value) => match value {
+                true => "True",
+                false => "False",
+            },
+            Self::Address(addr) => addr.fmt(f),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     Immediate(Box<[u8]>),
@@ -25,7 +80,7 @@ impl std::fmt::Display for Source {
                 }
                 write!(f, "]")
             }
-            Self::Address(addr) => write!(f, "{addr}"),
+            Self::Address(addr) => addr.fmt(f),
         }
     }
 }
@@ -38,7 +93,6 @@ impl Source {
         }
     }
 
-    #[track_caller]
     pub fn get_as<'a, T>(&'a self, ram: &'a Memory) -> Result<&'a T, RuntimeError> {
         match self {
             Self::Immediate(value) => {
